@@ -1,4 +1,4 @@
--- Weeknight V1 database setup
+-- Mealz V2 database setup
 -- Run this once in Supabase > SQL Editor.
 
 create extension if not exists pgcrypto;

@@ -2,7 +2,7 @@
   'use strict';
 
   const root = document.getElementById('app');
-  const config = window.WEEKNIGHT_CONFIG || {};
+  const config = window.MEALZ_CONFIG || window.WEEKNIGHT_CONFIG || {};
   const sharedMode = Boolean(config.supabaseUrl && config.supabasePublishableKey && window.supabase);
   const sb = sharedMode
     ? window.supabase.createClient(config.supabaseUrl, config.supabasePublishableKey)
@@ -218,7 +218,13 @@
 
   class LocalStore {
     constructor() {
-      this.prefix = 'weeknight-v1-';
+      this.prefix = 'mealz-v2-';
+      this.legacyPrefix = 'weeknight-v1-';
+      ['recipes', 'meals', 'groceries'].forEach(name => {
+        if (localStorage.getItem(this.prefix + name) == null && localStorage.getItem(this.legacyPrefix + name) != null) {
+          localStorage.setItem(this.prefix + name, localStorage.getItem(this.legacyPrefix + name));
+        }
+      });
     }
     read(name, fallback = []) {
       try { return JSON.parse(localStorage.getItem(this.prefix + name)) ?? fallback; }
@@ -412,7 +418,7 @@
 
   function startRealtime(userId) {
     if (!sb || realtimeChannel) return;
-    realtimeChannel = sb.channel(`weeknight-${userId}`)
+    realtimeChannel = sb.channel(`mealz-${userId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'recipes', filter: `user_id=eq.${userId}` }, scheduleReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'weekly_meals', filter: `user_id=eq.${userId}` }, scheduleReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'grocery_items', filter: `user_id=eq.${userId}` }, scheduleReload)
@@ -440,7 +446,7 @@
       <main class="auth-shell">
         <section class="auth-card">
           <div class="auth-logo">🍽</div>
-          <h1>Weeknight</h1>
+          <h1>Mealz</h1>
           <p>One shared login for the two of you. Sign in with the same account on both phones and your week, recipes, and grocery list stay together.</p>
           ${setupError ? `<div class="error-box">${escapeHtml(state.authError)}</div>` : ''}
           ${state.authError && !setupError ? `<div class="error-box">${escapeHtml(state.authError)}</div>` : ''}
@@ -460,7 +466,7 @@
 
   function render() {
     if (state.loading) {
-      root.innerHTML = `<main class="auth-shell"><div class="auth-card"><strong>Loading Weeknight…</strong></div></main>`;
+      root.innerHTML = `<main class="auth-shell"><div class="auth-card"><strong>Loading Mealz…</strong></div></main>`;
       return;
     }
     if (state.cook) {
@@ -473,7 +479,7 @@
         <header class="topbar">
           <div class="brand-wrap">
             <div class="brand-mark">🍽</div>
-            <div><div class="brand">Weeknight</div><div class="subbrand">Plan less. Eat well.</div></div>
+            <div><div class="brand">Meal<span class="brand-z">z</span></div><div class="subbrand">Plan less. Eat well.</div></div>
           </div>
           <div class="mode-pill">${sharedMode ? '☁ Shared household' : '◉ Demo on this device'}</div>
         </header>
@@ -615,7 +621,7 @@
   function renderRecipeCard(recipe) {
     const total = Number(recipe.prep_minutes || 0) + Number(recipe.cook_minutes || 0);
     return `<article class="recipe-card">
-      <div class="recipe-card-top"><div><div class="recipe-name">${escapeHtml(recipe.name)}</div><div class="recipe-meta">${escapeHtml(recipe.cuisine || 'Weeknight')} · ${total} min · ${escapeHtml(recipe.difficulty || 'Easy')}</div></div>
+      <div class="recipe-card-top"><div><div class="recipe-name">${escapeHtml(recipe.name)}</div><div class="recipe-meta">${escapeHtml(recipe.cuisine || 'Dinner')} · ${total} min · ${escapeHtml(recipe.difficulty || 'Easy')}</div></div>
       <button type="button" class="favorite-btn" data-action="toggle-favorite" data-recipe-id="${recipe.id}" aria-label="Toggle favorite">${recipe.favorite ? '❤️' : '♡'}</button></div>
       <div class="recipe-tags">${(recipe.tags || []).slice(0, 3).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}${recipe.is_new ? '<span class="tag">✨ New</span>' : ''}</div>
       <div class="recipe-actions"><button type="button" class="btn btn-outline btn-small" data-action="view-recipe" data-recipe-id="${recipe.id}">View</button><button type="button" class="btn btn-primary btn-small" data-action="plan-recipe" data-recipe-id="${recipe.id}">Plan</button></div>
@@ -667,7 +673,7 @@
         ${sharedMode ? '<div class="more-row"><div><strong>Account</strong><span>Use the same login on both phones.</span></div><button type="button" class="btn btn-outline btn-small" data-action="signout">Sign Out</button></div>' : '<div class="more-row"><div><strong>Reset demo</strong><span>Restore the sample recipes and clear local planning data.</span></div><button type="button" class="btn btn-outline btn-small" data-action="reset-demo">Reset</button></div>'}
       </div>
     </section>
-    <section class="panel"><h3 style="margin-top:0">Next upgrades</h3><p class="section-subtitle">Recipe Keeper import, internet recipe discovery/sourcing, prep-ahead mode, and smarter “similar but new” suggestions are deliberately left for the next pass so the first version stays simple.</p></section>`;
+    <section class="panel"><h3 style="margin-top:0">Next upgrades</h3><p class="section-subtitle">Recipe Keeper bulk import, prep-ahead mode, and smarter “similar but new” suggestions are the next logical upgrades. Clean recipe import from a URL is now built in.</p></section>`;
   }
 
   function renderModal() {
@@ -739,28 +745,48 @@
     if (!recipe) return '';
     const total = Number(recipe.prep_minutes || 0) + Number(recipe.cook_minutes || 0);
     const body = `<div class="recipe-detail panel" style="background:white">
-      <div class="recipe-meta">${escapeHtml(recipe.cuisine || 'Weeknight')} · ${total} min · ${escapeHtml(recipe.difficulty || 'Easy')}</div>
+      <div class="recipe-meta">${escapeHtml(recipe.cuisine || 'Dinner')} · ${total} min · ${escapeHtml(recipe.difficulty || 'Easy')}</div>
       <h3>Ingredients</h3><ul class="ingredient-list">${(recipe.ingredients || []).map(i => `<li>${escapeHtml(i.amount || '')} ${escapeHtml(i.name || '')}</li>`).join('')}</ul>
       <h3>Directions</h3><ol class="step-list">${(recipe.steps || []).map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ol>
-      ${recipe.source_url ? `<p><a class="source-link" href="${escapeHtml(recipe.source_url)}" target="_blank" rel="noopener">Original source ↗</a></p>` : ''}
+      ${recipe.source_url ? `<p class="recipe-source-note">Saved cleanly in Mealz · <a class="source-link" href="${escapeHtml(recipe.source_url)}" target="_blank" rel="noopener">Source ↗</a></p>` : ''}
       <div class="recipe-actions" style="margin-top:18px"><button type="button" class="btn btn-primary" data-action="cook" data-recipe-id="${recipe.id}">Start Cooking</button><button type="button" class="btn btn-outline" data-action="plan-recipe" data-recipe-id="${recipe.id}">Plan This</button></div>
     </div>`;
     return modalShell(recipe.name, recipe.favorite ? '❤️ Favorite' : '', body);
   }
 
   function renderAddRecipeModal() {
+    const mode = state.modal.mode || 'import';
+    if (mode === 'import') {
+      const body = `<form id="recipe-import-form" class="import-recipe-panel">
+        <div class="import-hero"><div class="import-icon">↗</div><div><strong>Paste a recipe link</strong><span>Mealz pulls out the ingredients and directions and leaves the ads, popups, stories, and clutter behind.</span></div></div>
+        ${state.modal.error ? `<div class="error-box">${escapeHtml(state.modal.error)}</div>` : ''}
+        <div class="form-field"><label>Recipe URL</label><input class="text-input" name="url" type="url" inputmode="url" autocomplete="url" required placeholder="https://www.example.com/recipe" value="${escapeHtml(state.modal.url || '')}" /></div>
+        <button class="btn btn-primary btn-wide" type="submit" ${state.modal.importing ? 'disabled' : ''}>${state.modal.importing ? 'Importing…' : 'Import Clean Recipe'}</button>
+        <button class="btn btn-outline btn-wide" type="button" data-action="manual-recipe">Enter Recipe Manually</button>
+        <p class="form-help centered">The original site is kept only as the recipe source. You cook from the clean copy saved in Mealz.</p>
+      </form>`;
+      return modalShell('Add Recipe', 'The easy way is a link.', body);
+    }
+
+    const imported = mode === 'review' ? (state.modal.imported || {}) : {};
+    const ingredientText = (imported.ingredients || []).map(i => `${i.amount || ''} | ${i.name || ''} | ${i.category || 'Other'}`).join('\n');
+    const stepText = (imported.steps || []).join('\n');
+    const sourceUrl = imported.source_url || '';
+    const sourceHost = (() => { try { return new URL(sourceUrl).hostname.replace(/^www\./, ''); } catch { return ''; } })();
     const body = `<form id="recipe-form" class="form-grid">
-      <div class="form-field full"><label>Recipe name</label><input class="text-input" name="name" required placeholder="Greek lemon chicken bowls" /></div>
-      <div class="form-field"><label>Cuisine</label><input class="text-input" name="cuisine" placeholder="Greek" /></div>
-      <div class="form-field"><label>Difficulty</label><select class="select-input" name="difficulty"><option>Very Easy</option><option selected>Easy</option><option>Moderate</option></select></div>
-      <div class="form-field"><label>Prep minutes</label><input class="text-input" name="prep_minutes" type="number" min="0" max="240" value="15" /></div>
-      <div class="form-field"><label>Cook minutes</label><input class="text-input" name="cook_minutes" type="number" min="0" max="360" value="20" /></div>
-      <div class="form-field full"><label>Ingredients</label><textarea class="textarea-input" name="ingredients" placeholder="2 lb | chicken breast | Meat\n3 | bell peppers | Produce\n2 cups | rice | Pantry"></textarea><div class="form-help">One per line: amount | ingredient | category</div></div>
-      <div class="form-field full"><label>Directions</label><textarea class="textarea-input" name="steps" placeholder="Start the rice.\nSlice the chicken and vegetables.\nCook until done."></textarea><div class="form-help">One step per line.</div></div>
-      <div class="form-field full"><label>Recipe source URL (optional)</label><input class="text-input" name="source_url" type="url" placeholder="https://…" /></div>
+      ${mode === 'review' ? `<div class="import-success full"><strong>✓ Recipe cleaned up</strong><span>Review it if you want, then save it to Mealz.${sourceHost ? ` Source: ${escapeHtml(sourceHost)}` : ''}</span></div>` : ''}
+      <div class="form-field full"><label>Recipe name</label><input class="text-input" name="name" required placeholder="Greek lemon chicken bowls" value="${escapeHtml(imported.name || '')}" /></div>
+      <div class="form-field"><label>Cuisine</label><input class="text-input" name="cuisine" placeholder="Greek" value="${escapeHtml(imported.cuisine || '')}" /></div>
+      <div class="form-field"><label>Difficulty</label><select class="select-input" name="difficulty"><option ${imported.difficulty === 'Very Easy' ? 'selected' : ''}>Very Easy</option><option ${!imported.difficulty || imported.difficulty === 'Easy' ? 'selected' : ''}>Easy</option><option ${imported.difficulty === 'Moderate' ? 'selected' : ''}>Moderate</option></select></div>
+      <div class="form-field"><label>Prep minutes</label><input class="text-input" name="prep_minutes" type="number" min="0" max="240" value="${escapeHtml(imported.prep_minutes ?? 15)}" /></div>
+      <div class="form-field"><label>Cook minutes</label><input class="text-input" name="cook_minutes" type="number" min="0" max="360" value="${escapeHtml(imported.cook_minutes ?? 20)}" /></div>
+      <div class="form-field full"><label>Ingredients</label><textarea class="textarea-input" name="ingredients" placeholder="2 lb | chicken breast | Meat\n3 | bell peppers | Produce\n2 cups | rice | Pantry">${escapeHtml(ingredientText)}</textarea><div class="form-help">One per line: amount | ingredient | category</div></div>
+      <div class="form-field full"><label>Directions</label><textarea class="textarea-input" name="steps" placeholder="Start the rice.\nSlice the chicken and vegetables.\nCook until done.">${escapeHtml(stepText)}</textarea><div class="form-help">One step per line.</div></div>
+      ${sourceUrl ? `<input type="hidden" name="source_url" value="${escapeHtml(sourceUrl)}" />` : `<div class="form-field full"><label>Recipe source URL (optional)</label><input class="text-input" name="source_url" type="url" placeholder="https://…" /></div>`}
       <div class="form-field full"><button class="btn btn-primary btn-wide" type="submit">Save Recipe</button></div>
+      ${mode === 'review' ? '<div class="form-field full"><button class="btn btn-outline btn-wide" type="button" data-action="import-recipe-mode">Try Another Link</button></div>' : '<div class="form-field full"><button class="btn btn-outline btn-wide" type="button" data-action="import-recipe-mode">Import From URL Instead</button></div>'}
     </form>`;
-    return modalShell('Add Recipe', 'Keep it simple. You can always improve it after you cook it.', body);
+    return modalShell(mode === 'review' ? 'Review Recipe' : 'Add Recipe', mode === 'review' ? 'Mealz found the useful part.' : 'Keep it simple. You can always improve it after you cook it.', body);
   }
 
   function renderChooseDayModal() {
@@ -818,7 +844,7 @@
     if (!recipe) { state.cook = null; render(); return; }
     const steps = recipe.steps || [];
     if (state.cook.finished || !steps.length) {
-      root.innerHTML = `<div class="app-shell"><main class="cook-shell"><div class="cook-top"><button type="button" class="btn btn-outline" data-action="close-cook">← Back</button><div class="cook-progress">Dinner done</div></div><section class="cook-card rating-panel"><h1 style="margin-top:0">How was it?</h1><p class="section-subtitle">One tap helps Weeknight make better suggestions.</p><div class="rating-buttons"><button type="button" class="btn btn-primary" data-action="rate" data-rating="makeagain">👍 Make Again</button><button type="button" class="btn" data-action="rate" data-rating="fine">😐 It Was Fine</button><button type="button" class="btn btn-danger" data-action="rate" data-rating="nope">👎 Skip Next Time</button></div></section></main></div>`;
+      root.innerHTML = `<div class="app-shell"><main class="cook-shell"><div class="cook-top"><button type="button" class="btn btn-outline" data-action="close-cook">← Back</button><div class="cook-progress">Dinner done</div></div><section class="cook-card rating-panel"><h1 style="margin-top:0">How was it?</h1><p class="section-subtitle">One tap helps Mealz make better suggestions.</p><div class="rating-buttons"><button type="button" class="btn btn-primary" data-action="rate" data-rating="makeagain">👍 Make Again</button><button type="button" class="btn" data-action="rate" data-rating="fine">😐 It Was Fine</button><button type="button" class="btn btn-danger" data-action="rate" data-rating="nope">👎 Skip Next Time</button></div></section></main></div>`;
       return;
     }
     const step = Math.min(state.cook.step, steps.length - 1);
@@ -843,6 +869,8 @@
       if (action === 'select-plan-recipe') { if (state.modal?.type === 'recommendWeek') { state.modal = { type: 'chooseDay', recipeId: button.dataset.recipeId }; render(); } else { await selectPlanRecipe(button.dataset.recipeId, button.dataset.leftover === 'true'); } return; }
       if (action === 'add-leftover-next') { await addLeftoverNext(); return; }
       if (action === 'add-recipe') { state.modal = { type: 'addRecipe' }; render(); return; }
+      if (action === 'manual-recipe') { state.modal = { type: 'addRecipe', mode: 'manual' }; render(); return; }
+      if (action === 'import-recipe-mode') { state.modal = { type: 'addRecipe', mode: 'import' }; render(); return; }
       if (action === 'view-recipe') { state.modal = { type: 'recipeDetail', recipeId: button.dataset.recipeId }; render(); return; }
       if (action === 'plan-recipe') { state.modal = { type: 'chooseDay', recipeId: button.dataset.recipeId }; render(); return; }
       if (action === 'choose-day-for-recipe') { await planRecipeOnDate(state.modal.recipeId, button.dataset.date, true); return; }
@@ -892,6 +920,7 @@
       });
       await reloadData(); render(); return;
     }
+    if (event.target.id === 'recipe-import-form') { await importRecipeUrl(event.target); return; }
     if (event.target.id === 'recipe-form') { await saveNewRecipe(event.target); return; }
   }
 
@@ -954,6 +983,29 @@
     if (!recipe) return;
     await store.saveRecipe({ ...recipe, favorite: !recipe.favorite });
     await reloadData(); render();
+  }
+
+  async function importRecipeUrl(form) {
+    const fd = new FormData(form);
+    const url = String(fd.get('url') || '').trim();
+    if (!url) return;
+    state.modal = { type: 'addRecipe', mode: 'import', importing: true, url };
+    render();
+    try {
+      const response = await fetch('/api/import-recipe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url })
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.recipe) throw new Error(data.error || 'Mealz could not read a clean recipe from that page.');
+      state.modal = { type: 'addRecipe', mode: 'review', imported: data.recipe };
+      render();
+    } catch (error) {
+      const localHint = location.protocol === 'file:' ? ' URL import works after Mealz is deployed to Vercel.' : '';
+      state.modal = { type: 'addRecipe', mode: 'import', importing: false, url, error: `${error.message || 'Unable to import recipe.'}${localHint}` };
+      render();
+    }
   }
 
   async function saveNewRecipe(form) {
@@ -1051,6 +1103,6 @@
 
   start().catch(error => {
     console.error(error);
-    root.innerHTML = `<main class="auth-shell"><section class="auth-card"><h1>Weeknight</h1><div class="error-box">${escapeHtml(error.message || 'Unable to start the app.')}</div></section></main>`;
+    root.innerHTML = `<main class="auth-shell"><section class="auth-card"><h1>Mealz</h1><div class="error-box">${escapeHtml(error.message || 'Unable to start Mealz.')}</div></section></main>`;
   });
 })();

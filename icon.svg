@@ -1,5 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Mealz">
   <rect width="128" height="128" rx="28" fill="#2f6b4f"/>
-  <circle cx="64" cy="64" r="38" fill="#fbfaf7"/>
-  <path d="M48 38v31c0 7 5 12 12 12h2v19h8V81h2c7 0 12-5 12-12V38h-8v25h-8V38h-8v25h-4V38z" fill="#2f6b4f"/>
+  <circle cx="64" cy="64" r="42" fill="#fbfaf7"/>
+  <path d="M38 81V47h9l17 21 17-21h9v34h-10V62L64 81 48 62v19z" fill="#2f6b4f"/>
+  <path d="M77 88h20v7H65v-5l19-23H66v-7h30v5z" fill="#2f6b4f"/>
 </svg>

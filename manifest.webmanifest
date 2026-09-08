@@ -1,6 +1,6 @@
 {
-  "name": "Weeknight Meal Planner",
-  "short_name": "Weeknight",
+  "name": "Mealz",
+  "short_name": "Mealz",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#fbfaf7",

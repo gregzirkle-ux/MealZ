@@ -20,13 +20,14 @@
 }
 
 * { box-sizing: border-box; }
-html { background: var(--bg); }
+html { background: var(--bg); touch-action: manipulation; -webkit-text-size-adjust: 100%; }
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
 }
 button, input, textarea, select { font: inherit; }
+button, a, input, textarea, select { touch-action: manipulation; }
 button { cursor: pointer; }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
   outline: 3px solid rgba(47, 107, 79, 0.22);
@@ -55,6 +56,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   flex: 0 0 auto;
 }
 .brand { font-size: 22px; font-weight: 800; letter-spacing: -0.03em; }
+.brand-z { font-weight: 950; }
 .subbrand { color: var(--muted); font-size: 12px; margin-top: 1px; }
 .mode-pill {
   border: 1px solid var(--line); background: white; color: var(--muted);
@@ -339,3 +341,21 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .modal { border-radius: 24px 24px 0 0; max-height: 92vh; }
   .rating-buttons { grid-template-columns: 1fr; }
 }
+
+
+/* Mealz V2: clean recipe import */
+.import-recipe-panel { display: grid; gap: 13px; }
+.import-hero {
+  display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: center;
+  padding: 15px; border-radius: 16px; background: var(--green-soft); color: var(--text);
+}
+.import-hero strong, .import-success strong { display: block; font-size: 16px; margin-bottom: 4px; }
+.import-hero span, .import-success span { display: block; color: var(--muted); font-size: 13px; line-height: 1.4; }
+.import-icon {
+  width: 42px; height: 42px; border-radius: 13px; background: var(--green); color: white;
+  display: grid; place-items: center; font-size: 22px; font-weight: 800;
+}
+.import-success { padding: 13px 14px; border-radius: 14px; background: var(--green-soft); }
+.centered { text-align: center; }
+.recipe-source-note { color: var(--muted); font-size: 12px; margin: 16px 0 0; }
+.btn:disabled { opacity: .58; cursor: default; }
