@@ -255,6 +255,10 @@
       this.write('recipes', recipes);
       return next;
     }
+    async deleteRecipe(recipeId) {
+      this.write('meals', this.read('meals').filter(m => m.recipe_id !== recipeId));
+      this.write('recipes', this.read('recipes').filter(r => r.id !== recipeId));
+    }
     async upsertMeal(meal) {
       const meals = this.read('meals');
       const index = meals.findIndex(m => m.meal_date === meal.meal_date);
@@ -328,6 +332,12 @@
       const { data, error } = await this.client.from('recipes').insert(payload).select().single();
       if (error) throw error;
       return data;
+    }
+    async deleteRecipe(recipeId) {
+      const { error: mealError } = await this.client.from('weekly_meals').delete().eq('recipe_id', recipeId);
+      if (mealError) throw mealError;
+      const { error } = await this.client.from('recipes').delete().eq('id', recipeId);
+      if (error) throw error;
     }
     async upsertMeal(meal) {
       const payload = { ...meal, user_id: this.user.id };
@@ -750,6 +760,7 @@
       <h3>Directions</h3><ol class="step-list">${(recipe.steps || []).map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ol>
       ${recipe.source_url ? `<p class="recipe-source-note">Saved cleanly in Mealz · <a class="source-link" href="${escapeHtml(recipe.source_url)}" target="_blank" rel="noopener">Source ↗</a></p>` : ''}
       <div class="recipe-actions" style="margin-top:18px"><button type="button" class="btn btn-primary" data-action="cook" data-recipe-id="${recipe.id}">Start Cooking</button><button type="button" class="btn btn-outline" data-action="plan-recipe" data-recipe-id="${recipe.id}">Plan This</button></div>
+      <div class="recipe-manage-actions"><button type="button" class="btn btn-outline btn-small" data-action="edit-recipe" data-recipe-id="${recipe.id}">Edit / Rename</button><button type="button" class="btn btn-outline btn-small" data-action="duplicate-recipe" data-recipe-id="${recipe.id}">Duplicate</button><button type="button" class="btn btn-danger btn-small" data-action="delete-recipe" data-recipe-id="${recipe.id}">Delete</button></div>
     </div>`;
     return modalShell(recipe.name, recipe.favorite ? '❤️ Favorite' : '', body);
   }
@@ -768,13 +779,16 @@
       return modalShell('Add Recipe', 'The easy way is a link.', body);
     }
 
-    const imported = mode === 'review' ? (state.modal.imported || {}) : {};
+    const editRecipe = mode === 'edit' ? recipeById(state.modal.recipeId) : null;
+    const imported = mode === 'review' || mode === 'duplicate' ? (state.modal.imported || {}) : (editRecipe || {});
     const ingredientText = (imported.ingredients || []).map(i => `${i.amount || ''} | ${i.name || ''} | ${i.category || 'Other'}`).join('\n');
     const stepText = (imported.steps || []).join('\n');
     const sourceUrl = imported.source_url || '';
     const sourceHost = (() => { try { return new URL(sourceUrl).hostname.replace(/^www\./, ''); } catch { return ''; } })();
     const body = `<form id="recipe-form" class="form-grid">
+      ${mode === 'edit' ? `<input type="hidden" name="recipe_id" value="${escapeHtml(editRecipe?.id || '')}" />` : ''}
       ${mode === 'review' ? `<div class="import-success full"><strong>✓ Recipe cleaned up</strong><span>Review it if you want, then save it to Mealz.${sourceHost ? ` Source: ${escapeHtml(sourceHost)}` : ''}</span></div>` : ''}
+      ${mode === 'duplicate' ? '<div class="import-success full"><strong>Duplicate recipe</strong><span>Give the copy a name and make any changes before saving.</span></div>' : ''}
       <div class="form-field full"><label>Recipe name</label><input class="text-input" name="name" required placeholder="Greek lemon chicken bowls" value="${escapeHtml(imported.name || '')}" /></div>
       <div class="form-field"><label>Cuisine</label><input class="text-input" name="cuisine" placeholder="Greek" value="${escapeHtml(imported.cuisine || '')}" /></div>
       <div class="form-field"><label>Difficulty</label><select class="select-input" name="difficulty"><option ${imported.difficulty === 'Very Easy' ? 'selected' : ''}>Very Easy</option><option ${!imported.difficulty || imported.difficulty === 'Easy' ? 'selected' : ''}>Easy</option><option ${imported.difficulty === 'Moderate' ? 'selected' : ''}>Moderate</option></select></div>
@@ -782,11 +796,13 @@
       <div class="form-field"><label>Cook minutes</label><input class="text-input" name="cook_minutes" type="number" min="0" max="360" value="${escapeHtml(imported.cook_minutes ?? 20)}" /></div>
       <div class="form-field full"><label>Ingredients</label><textarea class="textarea-input" name="ingredients" placeholder="2 lb | chicken breast | Meat\n3 | bell peppers | Produce\n2 cups | rice | Pantry">${escapeHtml(ingredientText)}</textarea><div class="form-help">One per line: amount | ingredient | category</div></div>
       <div class="form-field full"><label>Directions</label><textarea class="textarea-input" name="steps" placeholder="Start the rice.\nSlice the chicken and vegetables.\nCook until done.">${escapeHtml(stepText)}</textarea><div class="form-help">One step per line.</div></div>
-      ${sourceUrl ? `<input type="hidden" name="source_url" value="${escapeHtml(sourceUrl)}" />` : `<div class="form-field full"><label>Recipe source URL (optional)</label><input class="text-input" name="source_url" type="url" placeholder="https://…" /></div>`}
-      <div class="form-field full"><button class="btn btn-primary btn-wide" type="submit">Save Recipe</button></div>
-      ${mode === 'review' ? '<div class="form-field full"><button class="btn btn-outline btn-wide" type="button" data-action="import-recipe-mode">Try Another Link</button></div>' : '<div class="form-field full"><button class="btn btn-outline btn-wide" type="button" data-action="import-recipe-mode">Import From URL Instead</button></div>'}
+      ${mode === 'review' && sourceUrl ? `<input type="hidden" name="source_url" value="${escapeHtml(sourceUrl)}" />` : `<div class="form-field full"><label>Recipe source URL (optional)</label><input class="text-input" name="source_url" type="url" placeholder="https://…" value="${escapeHtml(sourceUrl)}" /></div>`}
+      <div class="form-field full"><button class="btn btn-primary btn-wide" type="submit">${mode === 'edit' ? 'Save Changes' : 'Save Recipe'}</button></div>
+      ${mode === 'review' ? '<div class="form-field full"><button class="btn btn-outline btn-wide" type="button" data-action="import-recipe-mode">Try Another Link</button></div>' : (mode === 'edit' || mode === 'duplicate' ? '' : '<div class="form-field full"><button class="btn btn-outline btn-wide" type="button" data-action="import-recipe-mode">Import From URL Instead</button></div>')}
     </form>`;
-    return modalShell(mode === 'review' ? 'Review Recipe' : 'Add Recipe', mode === 'review' ? 'Mealz found the useful part.' : 'Keep it simple. You can always improve it after you cook it.', body);
+    const modalTitle = mode === 'review' ? 'Review Recipe' : mode === 'edit' ? 'Edit Recipe' : mode === 'duplicate' ? 'Duplicate Recipe' : 'Add Recipe';
+    const modalSubtitle = mode === 'review' ? 'Mealz found the useful part.' : mode === 'edit' ? 'Change the name or anything else.' : mode === 'duplicate' ? 'Start with a copy, then make it yours.' : 'Keep it simple. You can always improve it after you cook it.';
+    return modalShell(modalTitle, modalSubtitle, body);
   }
 
   function renderChooseDayModal() {
@@ -872,6 +888,9 @@
       if (action === 'manual-recipe') { state.modal = { type: 'addRecipe', mode: 'manual' }; render(); return; }
       if (action === 'import-recipe-mode') { state.modal = { type: 'addRecipe', mode: 'import' }; render(); return; }
       if (action === 'view-recipe') { state.modal = { type: 'recipeDetail', recipeId: button.dataset.recipeId }; render(); return; }
+      if (action === 'edit-recipe') { state.modal = { type: 'addRecipe', mode: 'edit', recipeId: button.dataset.recipeId }; render(); return; }
+      if (action === 'duplicate-recipe') { duplicateRecipeDraft(button.dataset.recipeId); return; }
+      if (action === 'delete-recipe') { await deleteRecipe(button.dataset.recipeId); return; }
       if (action === 'plan-recipe') { state.modal = { type: 'chooseDay', recipeId: button.dataset.recipeId }; render(); return; }
       if (action === 'choose-day-for-recipe') { await planRecipeOnDate(state.modal.recipeId, button.dataset.date, true); return; }
       if (action === 'toggle-favorite') { await toggleFavorite(button.dataset.recipeId); return; }
@@ -1015,16 +1034,68 @@
       return { amount, name: name || amount, category: normalizeCategory(category) };
     });
     const steps = String(fd.get('steps') || '').split('\n').map(s => s.trim()).filter(Boolean);
+    const recipeId = String(fd.get('recipe_id') || '').trim();
+    const existing = recipeId ? recipeById(recipeId) : null;
+    const prep = clampNumber(fd.get('prep_minutes'), 0, 240);
+    const cook = clampNumber(fd.get('cook_minutes'), 0, 360);
     const recipe = {
+      ...(existing || {}),
+      ...(recipeId ? { id: recipeId } : {}),
       name: String(fd.get('name') || '').trim(), cuisine: String(fd.get('cuisine') || '').trim(),
-      prep_minutes: clampNumber(fd.get('prep_minutes'), 0, 240), cook_minutes: clampNumber(fd.get('cook_minutes'), 0, 360),
-      difficulty: String(fd.get('difficulty') || 'Easy'), favorite: false, rating: '', is_new: true,
-      tags: inferTags(String(fd.get('ingredients') || ''), clampNumber(fd.get('prep_minutes'), 0, 240), clampNumber(fd.get('cook_minutes'), 0, 360)),
+      prep_minutes: prep, cook_minutes: cook,
+      difficulty: String(fd.get('difficulty') || 'Easy'),
+      favorite: existing?.favorite || false,
+      rating: existing?.rating || '',
+      is_new: existing ? existing.is_new : true,
+      tags: inferTags(String(fd.get('ingredients') || ''), prep, cook),
       ingredients, steps, source_url: String(fd.get('source_url') || '').trim()
     };
     if (!recipe.name) return;
     const saved = await store.saveRecipe(recipe);
-    await reloadData(); state.modal = { type: 'recipeDetail', recipeId: saved.id }; render(); toast('Recipe saved');
+    await reloadData();
+    state.modal = { type: 'recipeDetail', recipeId: saved.id };
+    render();
+    toast(existing ? 'Recipe updated' : 'Recipe saved');
+  }
+
+  function duplicateRecipeDraft(recipeId) {
+    const recipe = recipeById(recipeId);
+    if (!recipe) return;
+    const copy = {
+      ...recipe,
+      id: undefined,
+      created_at: undefined,
+      name: `${recipe.name} Copy`,
+      favorite: false,
+      rating: '',
+      is_new: true,
+      ingredients: (recipe.ingredients || []).map(i => ({ ...i })),
+      steps: [...(recipe.steps || [])],
+      tags: [...(recipe.tags || [])]
+    };
+    state.modal = { type: 'addRecipe', mode: 'duplicate', imported: copy };
+    render();
+  }
+
+  function affectedWeekStarts(recipeId) {
+    return [...new Set(state.meals.filter(m => m.recipe_id === recipeId).map(m => dateKey(startOfWeek(parseLocalDate(m.meal_date)))) )];
+  }
+
+  async function deleteRecipe(recipeId) {
+    const recipe = recipeById(recipeId);
+    if (!recipe) return;
+    const plannedCount = state.meals.filter(m => m.recipe_id === recipeId).length;
+    const message = plannedCount
+      ? `Delete “${recipe.name}”? It is planned on ${plannedCount} calendar ${plannedCount === 1 ? 'day' : 'days'}, and those meal plans will also be removed.`
+      : `Delete “${recipe.name}”? This cannot be undone.`;
+    if (!confirm(message)) return;
+    const weeks = affectedWeekStarts(recipeId);
+    await store.deleteRecipe(recipeId);
+    await reloadData();
+    for (const weekStart of weeks) await buildGroceryListForWeek(weekStart);
+    state.modal = null;
+    render();
+    toast('Recipe deleted');
   }
 
   function inferTags(text, prep, cook) {
@@ -1048,11 +1119,15 @@
   }
 
   async function buildGroceryList() {
-    const start = weekKey();
-    const end = dateKey(addDays(state.weekStart, 6));
+    await buildGroceryListForWeek(weekKey());
+  }
+
+  async function buildGroceryListForWeek(start) {
+    const weekStartDate = parseLocalDate(start);
+    const end = dateKey(addDays(weekStartDate, 6));
     const weekMeals = state.meals.filter(m => m.meal_date >= start && m.meal_date <= end && m.type === 'meal' && m.recipe_id);
     const uniqueRecipeIds = [...new Set(weekMeals.map(m => m.recipe_id))];
-    const existing = currentWeekGroceries();
+    const existing = state.groceries.filter(g => g.week_start === start);
     const checkedByName = new Map(existing.map(i => [String(i.name).toLowerCase(), i.checked]));
     const map = new Map();
 

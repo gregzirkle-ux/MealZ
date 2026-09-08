@@ -1,4 +1,4 @@
-# Mealz — V2
+# Mealz — V3
 
 A mobile-first shared dinner planner and clean recipe keeper for a busy family week.
 
@@ -26,7 +26,13 @@ A mobile-first shared dinner planner and clean recipe keeper for a busy family w
 - Installable web-app manifest for adding to an iPhone Home Screen
 - iPhone double-tap zoom suppression while retaining ordinary scrolling and pinch zoom
 
-## New in V2
+
+## New in V3
+
+### Recipe management
+Open any saved recipe to **Edit / Rename**, **Duplicate**, or **Delete** it. Editing covers the recipe name, cuisine, prep/cook times, difficulty, ingredients, directions, and source URL while preserving its favorite/rating history. Deleting a recipe asks for confirmation; if it is already planned on the calendar, those planned meals are removed too and generated grocery lists for affected weeks are refreshed.
+
+## Core V2 additions
 
 ### 1. Mealz branding
 The app is now named **Mealz**. Existing V1 local demo data is migrated automatically when possible.
@@ -150,3 +156,7 @@ Open the deployed Mealz site, create/sign into the shared account, then sign in 
 5. Optional recipe photo import
 
 The product rule stays the same: **make dinner planning easier, not make the app more complicated.**
+
+## Recipe management
+
+Saved recipes are fully editable. Open a recipe and use **Edit / Rename**, **Duplicate**, or **Delete**. Editing can change the name, cuisine, times, difficulty, ingredients, directions, and source URL. Deleting a recipe also removes any calendar meals that reference it and refreshes generated grocery lists for those affected weeks.
