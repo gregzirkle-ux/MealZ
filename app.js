@@ -5,7 +5,14 @@
   const config = window.MEALZ_CONFIG || window.WEEKNIGHT_CONFIG || {};
   const sharedMode = Boolean(config.supabaseUrl && config.supabasePublishableKey && window.supabase);
   const sb = sharedMode
-    ? window.supabase.createClient(config.supabaseUrl, config.supabasePublishableKey)
+    ? window.supabase.createClient(config.supabaseUrl, config.supabasePublishableKey, {
+        auth: {
+          persistSession: true,
+          autoRefreshToken: true,
+          detectSessionInUrl: true,
+          storageKey: 'mealz-shared-household-auth'
+        }
+      })
     : null;
 
   const state = {
@@ -17,6 +24,7 @@
     user: null,
     modal: null,
     recipeSearch: '',
+    recipeTypeFilter: 'All',
     cook: null,
     authMessage: '',
     authError: '',
@@ -30,6 +38,23 @@
   function uid() {
     if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
     return `id-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  function cleanRecipePayload(recipe = {}) {
+    return {
+      name: String(recipe.name || '').trim(),
+      cuisine: String(recipe.cuisine || '').trim(),
+      prep_minutes: Number(recipe.prep_minutes || 0),
+      cook_minutes: Number(recipe.cook_minutes || 0),
+      difficulty: String(recipe.difficulty || 'Easy'),
+      favorite: Boolean(recipe.favorite),
+      rating: String(recipe.rating || ''),
+      is_new: Boolean(recipe.is_new),
+      tags: Array.isArray(recipe.tags) ? recipe.tags.filter(Boolean).map(String) : [],
+      ingredients: Array.isArray(recipe.ingredients) ? recipe.ingredients : [],
+      steps: Array.isArray(recipe.steps) ? recipe.steps : [],
+      source_url: String(recipe.source_url || '').trim()
+    };
   }
 
   function escapeHtml(value = '') {
@@ -255,6 +280,13 @@
       this.write('recipes', recipes);
       return next;
     }
+    async saveRecipes(items) {
+      const recipes = this.read('recipes');
+      const added = items.map(recipe => ({ ...cleanRecipePayload(recipe), id: uid(), created_at: new Date().toISOString() }));
+      recipes.push(...added);
+      this.write('recipes', recipes);
+      return added;
+    }
     async deleteRecipe(recipeId) {
       this.write('meals', this.read('meals').filter(m => m.recipe_id !== recipeId));
       this.write('recipes', this.read('recipes').filter(r => r.id !== recipeId));
@@ -321,17 +353,25 @@
       return { recipes: recipesRes.data, meals: mealsRes.data, groceries: groceriesRes.data };
     }
     async saveRecipe(recipe) {
-      const payload = { ...recipe, user_id: this.user.id };
-      delete payload.created_at;
+      const payload = { ...cleanRecipePayload(recipe), user_id: this.user.id };
       if (recipe.id) {
         const { data, error } = await this.client.from('recipes').update(payload).eq('id', recipe.id).select().single();
         if (error) throw error;
         return data;
       }
-      delete payload.id;
       const { data, error } = await this.client.from('recipes').insert(payload).select().single();
       if (error) throw error;
       return data;
+    }
+    async saveRecipes(items) {
+      const added = [];
+      for (let i = 0; i < items.length; i += 50) {
+        const rows = items.slice(i, i + 50).map(recipe => ({ ...cleanRecipePayload(recipe), user_id: this.user.id }));
+        const { data, error } = await this.client.from('recipes').insert(rows).select();
+        if (error) throw error;
+        added.push(...(data || []));
+      }
+      return added;
     }
     async deleteRecipe(recipeId) {
       const { error: mealError } = await this.client.from('weekly_meals').delete().eq('recipe_id', recipeId);
@@ -387,6 +427,7 @@
   async function start() {
     root.addEventListener('click', handleClick);
     root.addEventListener('input', handleInput);
+    root.addEventListener('change', handleChange);
     root.addEventListener('submit', handleSubmit);
 
     if (sharedMode) {
@@ -535,6 +576,35 @@
     return state.recipes.find(r => r.id === id);
   }
 
+  const DEFAULT_DISH_TYPES = ['Chicken', 'Beef', 'Pork', 'Turkey', 'Seafood', 'Lamb', 'Vegetarian', 'Pasta', 'Soup', 'Other'];
+
+  function dishTypeOf(recipe) {
+    const tagged = (recipe?.tags || []).find(tag => /^dish:/i.test(String(tag)));
+    if (tagged) return String(tagged).replace(/^dish:/i, '').trim() || 'Other';
+    const inferred = window.MealzRecipeKeeper?.inferDishType?.({
+      name: recipe?.name || '',
+      ingredients: recipe?.ingredients || [],
+      categories: recipe?.tags || [],
+      courses: []
+    });
+    return inferred || 'Other';
+  }
+
+  function visibleRecipeTags(recipe) {
+    return (recipe?.tags || []).filter(tag => !/^dish:/i.test(String(tag)) && !/^Recipe Keeper$/i.test(String(tag)));
+  }
+
+  function dishTypeOptions() {
+    const used = state.recipes.map(dishTypeOf).filter(Boolean);
+    return [...new Set([...DEFAULT_DISH_TYPES, ...used])];
+  }
+
+  function withDishTypeTag(tags, dishType) {
+    const cleaned = (tags || []).filter(tag => !/^dish:/i.test(String(tag)));
+    const type = String(dishType || 'Other').trim() || 'Other';
+    return [`dish:${type}`, ...cleaned];
+  }
+
   function mealClass(meal, recipe) {
     if (!meal) return 'open';
     if (meal.type === 'leftover') return 'leftover';
@@ -574,11 +644,10 @@
 
     return `
       ${todayCard}
-      <section class="week-panel">
-        <div class="week-toolbar">
-          <button type="button" class="icon-btn" data-action="previous-week" aria-label="Previous week">‹</button>
-          <div class="week-label"><strong>${weekTitle()}</strong><span>${formatWeekRange(state.weekStart)}</span></div>
-          <button type="button" class="icon-btn" data-action="next-week" aria-label="Next week">›</button>
+      <section class="week-panel week-hero">
+        <div class="week-toolbar week-hero-toolbar">
+          <div class="week-hero-title"><div class="week-kicker">Plan Ahead</div><div class="week-title-big">${weekTitle()}</div><div class="week-range">${formatWeekRange(state.weekStart)}</div></div>
+          <div class="week-nav-buttons"><button type="button" class="icon-btn" data-action="previous-week" aria-label="Previous week">‹</button><button type="button" class="icon-btn" data-action="next-week" aria-label="Next week">›</button></div>
         </div>
         <div class="legend" aria-label="Calendar color key">
           <span class="legend-item"><i class="legend-dot dot-meal"></i> Planned</span>
@@ -614,26 +683,51 @@
 
   function renderRecipes() {
     const q = state.recipeSearch.trim().toLowerCase();
-    const recipes = state.recipes.filter(r => !q || [r.name, r.cuisine, ...(r.tags || [])].join(' ').toLowerCase().includes(q));
+    const allTypes = [...new Set(state.recipes.map(dishTypeOf).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    if (state.recipeTypeFilter !== 'All' && !allTypes.includes(state.recipeTypeFilter)) state.recipeTypeFilter = 'All';
+    const searched = state.recipes.filter(r => !q || [r.name, r.cuisine, dishTypeOf(r), ...visibleRecipeTags(r)].join(' ').toLowerCase().includes(q));
+    const recipes = searched.filter(r => state.recipeTypeFilter === 'All' || dishTypeOf(r) === state.recipeTypeFilter);
+    const grouped = new Map();
+    recipes.forEach(recipe => {
+      const type = dishTypeOf(recipe);
+      if (!grouped.has(type)) grouped.set(type, []);
+      grouped.get(type).push(recipe);
+    });
+    grouped.forEach(list => list.sort((a, b) => Number(b.favorite) - Number(a.favorite) || a.name.localeCompare(b.name)));
+    const typeOrder = [...grouped.keys()].sort((a, b) => {
+      const ia = DEFAULT_DISH_TYPES.indexOf(a), ib = DEFAULT_DISH_TYPES.indexOf(b);
+      if (ia >= 0 || ib >= 0) return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
+      return a.localeCompare(b);
+    });
+
     return `
-      <section class="panel">
+      <section class="panel recipe-library-head">
         <div class="toolbar">
-          <div><h2 class="section-title">Recipes</h2><p class="section-subtitle">Your shared weeknight playbook.</p></div>
-          <button type="button" class="btn btn-primary" data-action="add-recipe">+ Add Recipe</button>
+          <div><h2 class="section-title">Recipes</h2><p class="section-subtitle">Organized by dish type so you can find dinner fast.</p></div>
+          <div class="recipe-toolbar-actions">
+            <button type="button" class="btn btn-primary" data-action="add-recipe">+ Add Recipe</button>
+            <label class="btn btn-outline recipekeeper-file-label" for="recipekeeper-file">⇩ Import Recipe Keeper<input id="recipekeeper-file" class="visually-hidden-file" type="file" accept=".zip,.html,.htm,text/html,application/zip" /></label>
+          </div>
         </div>
-        <div class="toolbar" style="margin-top:14px"><div class="search-wrap"><input id="recipe-search" class="search-input" type="search" placeholder="Search recipes or cuisine" value="${escapeHtml(state.recipeSearch)}" /></div></div>
+        <div class="toolbar" style="margin-top:14px"><div class="search-wrap"><input id="recipe-search" class="search-input" type="search" placeholder="Search recipes, cuisine, or dish type" value="${escapeHtml(state.recipeSearch)}" /></div></div>
+        <div class="dish-filter" aria-label="Filter recipes by dish type">
+          ${['All', ...allTypes].map(type => `<button type="button" class="dish-filter-btn ${state.recipeTypeFilter === type ? 'active' : ''}" data-action="recipe-type" data-type="${escapeHtml(type)}">${escapeHtml(type)}</button>`).join('')}
+        </div>
       </section>
-      <section class="recipe-grid">
-        ${recipes.length ? recipes.map(renderRecipeCard).join('') : '<div class="panel empty-state"><strong>No recipes found.</strong>Try another search or add one.</div>'}
-      </section>`;
+      ${typeOrder.length ? typeOrder.map(type => renderRecipeGroup(type, grouped.get(type))).join('') : '<section class="panel empty-state"><strong>No recipes found.</strong>Try another search or add one.</section>'}`;
+  }
+
+  function renderRecipeGroup(type, recipes) {
+    return `<section class="recipe-group"><div class="recipe-group-head"><h3>${escapeHtml(type)}</h3><span>${recipes.length} ${recipes.length === 1 ? 'recipe' : 'recipes'}</span></div><div class="recipe-grid">${recipes.map(renderRecipeCard).join('')}</div></section>`;
   }
 
   function renderRecipeCard(recipe) {
     const total = Number(recipe.prep_minutes || 0) + Number(recipe.cook_minutes || 0);
+    const tags = visibleRecipeTags(recipe).slice(0, 3);
     return `<article class="recipe-card">
       <div class="recipe-card-top"><div><div class="recipe-name">${escapeHtml(recipe.name)}</div><div class="recipe-meta">${escapeHtml(recipe.cuisine || 'Dinner')} · ${total} min · ${escapeHtml(recipe.difficulty || 'Easy')}</div></div>
       <button type="button" class="favorite-btn" data-action="toggle-favorite" data-recipe-id="${recipe.id}" aria-label="Toggle favorite">${recipe.favorite ? '❤️' : '♡'}</button></div>
-      <div class="recipe-tags">${(recipe.tags || []).slice(0, 3).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}${recipe.is_new ? '<span class="tag">✨ New</span>' : ''}</div>
+      <div class="recipe-tags"><span class="tag protein-tag">${escapeHtml(dishTypeOf(recipe))}</span>${tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}${recipe.is_new ? '<span class="tag">✨ New</span>' : ''}</div>
       <div class="recipe-actions"><button type="button" class="btn btn-outline btn-small" data-action="view-recipe" data-recipe-id="${recipe.id}">View</button><button type="button" class="btn btn-primary btn-small" data-action="plan-recipe" data-recipe-id="${recipe.id}">Plan</button></div>
     </article>`;
   }
@@ -680,10 +774,10 @@
         <div class="more-row"><div><strong>${sharedMode ? 'Shared Household' : 'Demo Mode'}</strong><span>${sharedMode ? escapeHtml(state.user?.email || 'Signed in') : 'Data is currently saved only on this device.'}</span></div><span>${sharedMode ? '☁' : '◉'}</span></div>
         <div class="more-row"><div><strong>Recipe style</strong><span>Fast prep · healthy · lean protein · fresh vegetables · simple.</span></div><span>✓</span></div>
         <div class="more-row"><div><strong>Favorite flavors</strong><span>Mexican · Greek · Peruvian · similar weeknight meals.</span></div><span>✓</span></div>
-        ${sharedMode ? '<div class="more-row"><div><strong>Account</strong><span>Use the same login on both phones.</span></div><button type="button" class="btn btn-outline btn-small" data-action="signout">Sign Out</button></div>' : '<div class="more-row"><div><strong>Reset demo</strong><span>Restore the sample recipes and clear local planning data.</span></div><button type="button" class="btn btn-outline btn-small" data-action="reset-demo">Reset</button></div>'}
+        ${sharedMode ? '<div class="more-row"><div><strong>Account</strong><span>Mealz stays signed in on this device until you choose Sign Out.</span></div><button type="button" class="btn btn-outline btn-small" data-action="signout">Sign Out</button></div>' : '<div class="more-row"><div><strong>Reset demo</strong><span>Restore the sample recipes and clear local planning data.</span></div><button type="button" class="btn btn-outline btn-small" data-action="reset-demo">Reset</button></div>'}
       </div>
     </section>
-    <section class="panel"><h3 style="margin-top:0">Next upgrades</h3><p class="section-subtitle">Recipe Keeper bulk import, prep-ahead mode, and smarter “similar but new” suggestions are the next logical upgrades. Clean recipe import from a URL is now built in.</p></section>`;
+    <section class="panel"><h3 style="margin-top:0">Next upgrades</h3><p class="section-subtitle">Recipe Keeper bulk import is now built in. Prep-ahead mode and smarter “similar but new” suggestions are the next logical upgrades, using your growing Mealz history.</p></section>`;
   }
 
   function renderModal() {
@@ -693,6 +787,7 @@
     if (state.modal.type === 'addRecipe') return renderAddRecipeModal();
     if (state.modal.type === 'chooseDay') return renderChooseDayModal();
     if (state.modal.type === 'recommendWeek') return renderRecommendWeekModal();
+    if (state.modal.type === 'recipeKeeperPreview') return renderRecipeKeeperPreview();
     return '';
   }
 
@@ -701,6 +796,21 @@
       <div class="modal-head"><div><h2 class="modal-title">${escapeHtml(title)}</h2>${subtitle ? `<div class="modal-subtitle">${escapeHtml(subtitle)}</div>` : ''}</div><button type="button" class="close-btn" data-action="close-modal" aria-label="Close">×</button></div>
       ${body}
     </section></div>`;
+  }
+
+  function renderRecipeKeeperPreview() {
+    const recipes = state.modal.recipes || [];
+    const skipped = state.modal.skipped || [];
+    const preview = recipes.slice(0, 14);
+    const body = `<div class="import-recipe-panel">
+      <div class="import-success"><strong>✓ Recipe Keeper file read</strong><span>${recipes.length} new ${recipes.length === 1 ? 'recipe' : 'recipes'} ready to add.${skipped.length ? ` ${skipped.length} existing ${skipped.length === 1 ? 'recipe was' : 'recipes were'} skipped.` : ''}</span></div>
+      <div class="rk-preview-list">${preview.map(recipe => `<div class="rk-preview-row"><div><strong>${escapeHtml(recipe.name)}</strong><span>${escapeHtml(dishTypeOf(recipe))}${recipe.cuisine ? ` · ${escapeHtml(recipe.cuisine)}` : ''}</span></div>${recipe.favorite ? '<span>❤️</span>' : ''}</div>`).join('')}${recipes.length > preview.length ? `<div class="rk-preview-more">+ ${recipes.length - preview.length} more</div>` : ''}</div>
+      ${skipped.length ? `<p class="form-help">Already in Mealz: ${escapeHtml(skipped.slice(0, 8).join(', '))}${skipped.length > 8 ? '…' : ''}</p>` : ''}
+      <button type="button" class="btn btn-primary btn-wide" data-action="import-recipekeeper-confirm" ${recipes.length ? '' : 'disabled'}>Import ${recipes.length} ${recipes.length === 1 ? 'Recipe' : 'Recipes'}</button>
+      <button type="button" class="btn btn-outline btn-wide" data-action="close-modal">Cancel</button>
+      <p class="form-help centered">Mealz imports the recipe text, times, favorites, source link, and Recipe Keeper categories. Photos stay in Recipe Keeper for now.</p>
+    </div>`;
+    return modalShell('Import Recipe Keeper', 'One bulk import instead of retyping your collection.', body);
   }
 
   function renderPlanModal() {
@@ -755,7 +865,7 @@
     if (!recipe) return '';
     const total = Number(recipe.prep_minutes || 0) + Number(recipe.cook_minutes || 0);
     const body = `<div class="recipe-detail panel" style="background:white">
-      <div class="recipe-meta">${escapeHtml(recipe.cuisine || 'Dinner')} · ${total} min · ${escapeHtml(recipe.difficulty || 'Easy')}</div>
+      <div class="recipe-meta"><strong>${escapeHtml(dishTypeOf(recipe))}</strong> · ${escapeHtml(recipe.cuisine || 'Dinner')} · ${total} min · ${escapeHtml(recipe.difficulty || 'Easy')}</div>
       <h3>Ingredients</h3><ul class="ingredient-list">${(recipe.ingredients || []).map(i => `<li>${escapeHtml(i.amount || '')} ${escapeHtml(i.name || '')}</li>`).join('')}</ul>
       <h3>Directions</h3><ol class="step-list">${(recipe.steps || []).map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ol>
       ${recipe.source_url ? `<p class="recipe-source-note">Saved cleanly in Mealz · <a class="source-link" href="${escapeHtml(recipe.source_url)}" target="_blank" rel="noopener">Source ↗</a></p>` : ''}
@@ -785,11 +895,14 @@
     const stepText = (imported.steps || []).join('\n');
     const sourceUrl = imported.source_url || '';
     const sourceHost = (() => { try { return new URL(sourceUrl).hostname.replace(/^www\./, ''); } catch { return ''; } })();
+    const dishType = imported.dish_type || dishTypeOf(imported);
+    const dishOptions = dishTypeOptions();
     const body = `<form id="recipe-form" class="form-grid">
       ${mode === 'edit' ? `<input type="hidden" name="recipe_id" value="${escapeHtml(editRecipe?.id || '')}" />` : ''}
       ${mode === 'review' ? `<div class="import-success full"><strong>✓ Recipe cleaned up</strong><span>Review it if you want, then save it to Mealz.${sourceHost ? ` Source: ${escapeHtml(sourceHost)}` : ''}</span></div>` : ''}
       ${mode === 'duplicate' ? '<div class="import-success full"><strong>Duplicate recipe</strong><span>Give the copy a name and make any changes before saving.</span></div>' : ''}
       <div class="form-field full"><label>Recipe name</label><input class="text-input" name="name" required placeholder="Greek lemon chicken bowls" value="${escapeHtml(imported.name || '')}" /></div>
+      <div class="form-field"><label>Dish type</label><input class="text-input" name="dish_type" list="dish-type-options" placeholder="Chicken" value="${escapeHtml(dishType === 'Other' && !imported.name ? '' : dishType)}" /><datalist id="dish-type-options">${dishOptions.map(type => `<option value="${escapeHtml(type)}"></option>`).join('')}</datalist><div class="form-help">Pick one you've used before or type a new one.</div></div>
       <div class="form-field"><label>Cuisine</label><input class="text-input" name="cuisine" placeholder="Greek" value="${escapeHtml(imported.cuisine || '')}" /></div>
       <div class="form-field"><label>Difficulty</label><select class="select-input" name="difficulty"><option ${imported.difficulty === 'Very Easy' ? 'selected' : ''}>Very Easy</option><option ${!imported.difficulty || imported.difficulty === 'Easy' ? 'selected' : ''}>Easy</option><option ${imported.difficulty === 'Moderate' ? 'selected' : ''}>Moderate</option></select></div>
       <div class="form-field"><label>Prep minutes</label><input class="text-input" name="prep_minutes" type="number" min="0" max="240" value="${escapeHtml(imported.prep_minutes ?? 15)}" /></div>
@@ -884,6 +997,8 @@
       if (action === 'clear-day') { await store.deleteMeal(state.modal.date); await reloadData(); state.modal = null; render(); toast('Day cleared'); return; }
       if (action === 'select-plan-recipe') { if (state.modal?.type === 'recommendWeek') { state.modal = { type: 'chooseDay', recipeId: button.dataset.recipeId }; render(); } else { await selectPlanRecipe(button.dataset.recipeId, button.dataset.leftover === 'true'); } return; }
       if (action === 'add-leftover-next') { await addLeftoverNext(); return; }
+      if (action === 'recipe-type') { state.recipeTypeFilter = button.dataset.type || 'All'; render(); return; }
+      if (action === 'import-recipekeeper-confirm') { await importRecipeKeeperConfirmed(); return; }
       if (action === 'add-recipe') { state.modal = { type: 'addRecipe' }; render(); return; }
       if (action === 'manual-recipe') { state.modal = { type: 'addRecipe', mode: 'manual' }; render(); return; }
       if (action === 'import-recipe-mode') { state.modal = { type: 'addRecipe', mode: 'import' }; render(); return; }
@@ -926,6 +1041,50 @@
       const input = document.getElementById('recipe-search');
       if (active && input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
     }
+  }
+
+  async function handleChange(event) {
+    if (event.target.id !== 'recipekeeper-file') return;
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    try {
+      toast('Reading Recipe Keeper export…');
+      const parsed = await window.MealzRecipeKeeper.readExport(file);
+      const existingNames = new Set(state.recipes.map(r => String(r.name || '').trim().toLowerCase()));
+      const skipped = [];
+      const recipes = [];
+      for (const raw of parsed) {
+        const nameKey = String(raw.name || '').trim().toLowerCase();
+        if (!nameKey || existingNames.has(nameKey)) {
+          if (raw.name) skipped.push(raw.name);
+          continue;
+        }
+        existingNames.add(nameKey);
+        const dishType = raw.dish_type || dishTypeOf(raw);
+        recipes.push({ ...cleanRecipePayload(raw), tags: withDishTypeTag(raw.tags || [], dishType) });
+      }
+      state.modal = { type: 'recipeKeeperPreview', recipes, skipped };
+      render();
+    } catch (error) {
+      console.error(error);
+      toast(error.message || 'Mealz could not import that Recipe Keeper file.');
+    }
+  }
+
+  async function importRecipeKeeperConfirmed() {
+    const recipes = state.modal?.type === 'recipeKeeperPreview' ? (state.modal.recipes || []) : [];
+    if (!recipes.length) return;
+    const count = recipes.length;
+    state.modal = null;
+    render();
+    toast(`Importing ${count} recipes…`);
+    await store.saveRecipes(recipes);
+    await reloadData();
+    state.view = 'recipes';
+    state.recipeTypeFilter = 'All';
+    render();
+    toast(`${count} Recipe Keeper ${count === 1 ? 'recipe' : 'recipes'} imported`);
   }
 
   async function handleSubmit(event) {
@@ -1038,6 +1197,8 @@
     const existing = recipeId ? recipeById(recipeId) : null;
     const prep = clampNumber(fd.get('prep_minutes'), 0, 240);
     const cook = clampNumber(fd.get('cook_minutes'), 0, 360);
+    const dishType = String(fd.get('dish_type') || '').trim() || dishTypeOf(existing || state.modal?.imported || {});
+    const retainedTags = existing?.tags || state.modal?.imported?.tags || [];
     const recipe = {
       ...(existing || {}),
       ...(recipeId ? { id: recipeId } : {}),
@@ -1047,7 +1208,7 @@
       favorite: existing?.favorite || false,
       rating: existing?.rating || '',
       is_new: existing ? existing.is_new : true,
-      tags: inferTags(String(fd.get('ingredients') || ''), prep, cook),
+      tags: withDishTypeTag([...new Set([...retainedTags.filter(tag => !/^dish:/i.test(String(tag)) && !['lean protein', 'fresh vegetables', 'quick'].includes(String(tag).toLowerCase())), ...inferTags(String(fd.get('ingredients') || ''), prep, cook)])], dishType),
       ingredients, steps, source_url: String(fd.get('source_url') || '').trim()
     };
     if (!recipe.name) return;

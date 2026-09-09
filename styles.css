@@ -372,3 +372,96 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 @media (max-width: 520px) {
   .recipe-manage-actions .btn { min-height: 44px; }
 }
+
+/* Mealz V4: stronger weekly planner + organized recipe library */
+.week-hero {
+  background: linear-gradient(135deg, #ffffff, #f1f6f2);
+  border-color: #d3dfd6;
+  box-shadow: var(--shadow);
+  padding: 20px;
+}
+.week-hero-toolbar { margin-bottom: 14px; }
+.week-hero-title { min-width: 0; }
+.week-kicker {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  font-weight: 800;
+  color: var(--green);
+}
+.week-title-big {
+  font-size: 26px;
+  line-height: 1.08;
+  margin-top: 4px;
+  font-weight: 850;
+  letter-spacing: -.035em;
+}
+.week-range { color: var(--muted); font-size: 13px; margin-top: 5px; }
+.week-nav-buttons { display: flex; gap: 8px; flex: 0 0 auto; }
+
+.recipe-library-head { box-shadow: var(--shadow); }
+.recipe-toolbar-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.recipekeeper-file-label { display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.visually-hidden-file {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  overflow: hidden !important;
+  clip: rect(0 0 0 0) !important;
+  white-space: nowrap !important;
+  clip-path: inset(50%) !important;
+}
+.dish-filter {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 13px 0 2px;
+  scrollbar-width: none;
+}
+.dish-filter::-webkit-scrollbar { display: none; }
+.dish-filter-btn {
+  border: 1px solid var(--line);
+  background: white;
+  color: var(--muted);
+  min-height: 40px;
+  border-radius: 999px;
+  padding: 8px 13px;
+  font-weight: 780;
+  white-space: nowrap;
+}
+.dish-filter-btn.active { background: var(--green); border-color: var(--green); color: white; }
+.recipe-group { display: grid; gap: 10px; }
+.recipe-group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px;
+}
+.recipe-group-head h3 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
+.recipe-group-head span { color: var(--muted); font-size: 12px; }
+.protein-tag { background: var(--green-soft); color: var(--green); font-weight: 780; }
+.recipe-manage-actions { border-top-color: var(--line); }
+
+.rk-preview-list { display: grid; gap: 7px; max-height: 340px; overflow: auto; }
+.rk-preview-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  padding: 11px 12px;
+}
+.rk-preview-row strong { display: block; }
+.rk-preview-row span { color: var(--muted); font-size: 12px; }
+.rk-preview-more { text-align: center; color: var(--muted); font-size: 12px; padding: 6px; }
+
+@media (max-width: 620px) {
+  .week-hero { padding: 16px 13px; }
+  .week-title-big { font-size: 24px; }
+  .recipe-toolbar-actions { width: 100%; display: grid; grid-template-columns: 1fr; }
+  .recipe-toolbar-actions .btn { width: 100%; }
+  .recipe-group-head h3 { font-size: 18px; }
+}
