@@ -1,8 +1,37 @@
-# Mealz V5
+# Mealz V6
 
 A shared dinner planner and recipe keeper built for phones first.
 
 **Main loop:** Plan the week, pick a recipe, add notes, shop, cook.
+
+## New in V6
+
+### Look
+New highlight color, #FF8200. Backgrounds are white and bright, lines are lighter, and the tagline is now "plan, eat, survive". The app icon is the skull with fork and knife, recolored onto the orange background.
+
+### Recipes are tiles
+Both the Recipes page and the Swap picker now use the same two column tile grid. Each tile has a colored block by dish type, the name, and the total time. When photos arrive later, they drop into that colored block with no other change.
+
+### One Filter button
+The rows of chips are gone. Both pages have Search, a Filter button, and a heart toggle for favorites. Filter opens a sheet with dish type, where you can select as many as you want, and total time. The dish type list is built from your recipes, so new categories appear on their own. The count on the button shows how many filters are active.
+
+### Back goes back
+Opening a recipe from a meal night now returns you to that meal night. The close button turns into a back arrow whenever there is somewhere to go back to.
+
+### Grocery
+The controls at the top are tiles: Rebuild, Hide Checked, Clear Checked, and Clear All. Clear All asks first.
+
+### Two layout fixes
+The filter row was pushing about 28 pixels past the screen edge, which cut off the last options. Fixed. The wide screen layout is now locked to devices with a real pointer, so an iPhone cannot fall into the desktop layout even if Safari is set to request the desktop site.
+
+## Installing V6
+
+1. Replace `app.js`, `styles.css`, `index.html`, `manifest.webmanifest`, `apple-touch-icon.png`, and `README.md`, and add `icon-192.png`, `icon-512.png`, and `icon-maskable-512.png`.
+2. Delete `icon.svg` from the repo. Nothing points at it now.
+3. Leave `config.js` alone.
+4. Commit, let Vercel redeploy, then refresh on your phone. To see the new icon on your home screen, delete the old Mealz icon and add it again from Safari.
+
+No database changes in V6.
 
 ## New in V5
 

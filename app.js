@@ -24,10 +24,12 @@
     user: null,
     modal: null,
     recipeSearch: '',
-    recipeTypeFilter: 'All',
-    recipeFavoritesOnly: false,
     planSearch: '',
-    planTypeFilter: 'All',
+    modalStack: [],
+    filters: {
+      recipes: { types: [], time: 'any', favoritesOnly: false },
+      plan: { types: [], time: 'any', favoritesOnly: false }
+    },
     hideChecked: false,
     cook: null,
     authMessage: '',
@@ -59,6 +61,49 @@
       steps: Array.isArray(recipe.steps) ? recipe.steps : [],
       source_url: String(recipe.source_url || '').trim()
     };
+  }
+
+  function pushModal(next) {
+    if (state.modal) state.modalStack.push(state.modal);
+    state.modal = next;
+  }
+
+  function popModal() {
+    state.modal = state.modalStack.pop() || null;
+  }
+
+  function resetModals(next = null) {
+    state.modalStack = [];
+    state.modal = next;
+  }
+
+  function filterFor(context) {
+    return state.filters[context] || state.filters.recipes;
+  }
+
+  function filterCount(context) {
+    const f = filterFor(context);
+    return f.types.length + (f.time !== 'any' ? 1 : 0);
+  }
+
+  const TIME_OPTIONS = [
+    ['any', 'Any length'],
+    ['20', 'Under 20 minutes'],
+    ['30', 'Under 30 minutes'],
+    ['45', 'Under 45 minutes'],
+    ['46', '45 minutes or more']
+  ];
+
+  function passesFilter(recipe, context) {
+    const f = filterFor(context);
+    if (f.types.length && !f.types.includes(dishTypeOf(recipe))) return false;
+    if (f.favoritesOnly && !recipe.favorite) return false;
+    if (f.time !== 'any') {
+      const total = Number(recipe.prep_minutes || 0) + Number(recipe.cook_minutes || 0);
+      if (f.time === '46') { if (total < 45) return false; }
+      else if (total >= Number(f.time)) return false;
+    }
+    return true;
   }
 
   function cleanMealPayload(meal = {}) {
@@ -336,6 +381,9 @@
     async clearChecked(start) {
       this.write('groceries', this.read('groceries').filter(g => !(g.week_start === start && g.checked)));
     }
+    async clearWeek(start) {
+      this.write('groceries', this.read('groceries').filter(g => g.week_start !== start));
+    }
     async reset() {
       ['recipes', 'meals', 'groceries'].forEach(k => localStorage.removeItem(this.prefix + k));
       await this.initialize();
@@ -434,6 +482,10 @@
     }
     async clearChecked(start) {
       const { error } = await this.client.from('grocery_items').delete().eq('week_start', start).eq('checked', true);
+      if (error) throw error;
+    }
+    async clearWeek(start) {
+      const { error } = await this.client.from('grocery_items').delete().eq('week_start', start);
       if (error) throw error;
     }
   }
@@ -584,7 +636,7 @@
         <header class="topbar">
           <div class="brand-wrap">
             <div class="brand-mark">🍽</div>
-            <div><div class="brand">Meal<span class="brand-z">z</span></div><div class="subbrand">Plan less. Eat well.</div></div>
+            <div><div class="brand">Meal<span class="brand-z">z</span></div><div class="subbrand">plan, eat, survive</div></div>
           </div>
           <div class="mode-pill">${sharedMode ? '☁ Shared household' : '◉ Demo on this device'}</div>
         </header>
@@ -753,62 +805,62 @@
 
   function filteredRecipes() {
     const q = state.recipeSearch.trim().toLowerCase();
-    return sortByName(state.recipes.filter(r =>
-      matchesSearch(r, q)
-      && (state.recipeTypeFilter === 'All' || dishTypeOf(r) === state.recipeTypeFilter)
-      && (!state.recipeFavoritesOnly || r.favorite)
-    ));
+    return sortByName(state.recipes.filter(r => matchesSearch(r, q) && passesFilter(r, 'recipes')));
   }
 
   function recipeListInner(recipes) {
     return recipes.length
-      ? recipes.map(renderRecipeRow).join('')
-      : '<div class="panel empty-state"><strong>No recipes found.</strong>Try another search or clear the filters.</div>';
+      ? recipes.map(r => renderRecipeTile(r, 'view-recipe')).join('')
+      : '<div class="panel empty-state" style="grid-column:1/-1"><strong>No recipes found.</strong>Try another search or clear the filters.</div>';
   }
 
   function recipeHeadInner(recipes) {
-    const label = state.recipeFavoritesOnly ? 'Favorites' : state.recipeTypeFilter === 'All' ? 'All recipes' : state.recipeTypeFilter;
+    const f = filterFor('recipes');
+    const label = f.favoritesOnly ? 'Favorites' : f.types.length === 1 ? f.types[0] : 'Recipes';
     return `<h3>${escapeHtml(label)}</h3><span>${recipes.length} ${recipes.length === 1 ? 'recipe' : 'recipes'}</span>`;
   }
 
-  function renderRecipes() {
-    const allTypes = dishTypesInUse();
-    if (state.recipeTypeFilter !== 'All' && !allTypes.includes(state.recipeTypeFilter)) state.recipeTypeFilter = 'All';
-    const recipes = filteredRecipes();
+  function renderFilterBar(context) {
+    const f = filterFor(context);
+    const count = filterCount(context);
+    const inputId = context === 'plan' ? 'plan-search' : 'recipe-search';
+    const value = context === 'plan' ? state.planSearch : state.recipeSearch;
+    return `<div class="sticky-head">
+      <div class="filter-bar">
+        <input id="${inputId}" class="search-input" type="search" placeholder="Search recipes" value="${escapeHtml(value)}" />
+        <button type="button" class="filter-btn ${count ? 'active' : ''}" data-action="open-filter" data-context="${context}">☰ Filter${count ? ` (${count})` : ''}</button>
+        <button type="button" class="filter-btn heart-btn ${f.favoritesOnly ? 'active' : ''}" data-action="toggle-favorites-filter" data-context="${context}" aria-label="Show favorites only">${f.favoritesOnly ? '❤️' : '♡'}</button>
+      </div>
+    </div>`;
+  }
 
+  function renderRecipeTile(recipe, action, extra = '') {
+    const total = Number(recipe.prep_minutes || 0) + Number(recipe.cook_minutes || 0);
+    const type = dishTypeOf(recipe);
+    return `<div class="recipe-tile">
+      <button type="button" class="tile-main" data-action="${action}" data-recipe-id="${recipe.id}" ${extra}>
+        <span class="tile-art dish-${escapeHtml(String(type).replace(/[^a-z]/gi, ''))}">${dishIcon(recipe)}</span>
+        <span class="tile-body">
+          <span class="tile-name">${escapeHtml(recipe.name)}</span>
+          <span class="tile-meta">${escapeHtml(type)} · ${total || '?'} min${recipe.is_new ? ' · ✨' : ''}</span>
+        </span>
+      </button>
+      <button type="button" class="tile-fav" data-action="toggle-favorite" data-recipe-id="${recipe.id}" aria-label="Toggle favorite">${recipe.favorite ? '❤️' : '♡'}</button>
+    </div>`;
+  }
+
+  function renderRecipes() {
+    const recipes = filteredRecipes();
     return `
       <section>
-        <div class="sticky-head">
-          <div class="search-row">
-            <input id="recipe-search" class="search-input" type="search" placeholder="Search recipes, cuisine, dish type" value="${escapeHtml(state.recipeSearch)}" />
-          </div>
-          <div class="chip-row" aria-label="Filter recipes">
-            <button type="button" class="chip ${state.recipeFavoritesOnly ? 'active' : ''}" data-action="recipe-favorites">❤️ Favorites</button>
-            ${['All', ...allTypes].map(type => `<button type="button" class="chip ${state.recipeTypeFilter === type ? 'active' : ''}" data-action="recipe-type" data-type="${escapeHtml(type)}">${escapeHtml(type)}</button>`).join('')}
-          </div>
-        </div>
+        ${renderFilterBar('recipes')}
         <div class="list-head">${recipeHeadInner(recipes)}</div>
-        <div class="recipe-list">${recipeListInner(recipes)}</div>
+        <div class="recipe-grid">${recipeListInner(recipes)}</div>
       </section>
-      <section class="tile-grid">
+      <section class="tile-grid" style="margin-top:14px">
         <button type="button" class="tile" data-action="add-recipe"><span class="tile-icon">＋</span><strong>Add Recipe</strong><span>Link or manual entry</span></button>
         <label class="tile recipekeeper-file-label" for="recipekeeper-file"><span class="tile-icon">⇩</span><strong>Import</strong><span>Recipe Keeper export</span><input id="recipekeeper-file" class="visually-hidden-file" type="file" accept=".zip,.html,.htm,text/html,application/zip" /></label>
       </section>`;
-  }
-
-  function renderRecipeRow(recipe) {
-    const total = Number(recipe.prep_minutes || 0) + Number(recipe.cook_minutes || 0);
-    const meta = [dishTypeOf(recipe), `${total || '?'} min`, recipe.cuisine].filter(Boolean).join(' · ');
-    return `<div class="recipe-row">
-      <button type="button" class="recipe-row-main" data-action="view-recipe" data-recipe-id="${recipe.id}">
-        <span class="dish-tile">${dishIcon(recipe)}</span>
-        <span class="recipe-row-text">
-          <span class="recipe-row-name">${escapeHtml(recipe.name)}</span>
-          <span class="recipe-row-meta">${escapeHtml(meta)}${recipe.is_new ? ' · ✨ New' : ''}</span>
-        </span>
-      </button>
-      <button type="button" class="fav-btn" data-action="toggle-favorite" data-recipe-id="${recipe.id}" aria-label="Toggle favorite">${recipe.favorite ? '❤️' : '♡'}</button>
-    </div>`;
   }
 
   function currentWeekGroceries() {
@@ -830,10 +882,11 @@
         <select class="select-input" name="category">${categories.map(c => `<option>${c}</option>`).join('')}</select>
         <button class="btn btn-primary" type="submit">Add</button>
       </form>
-      <div class="chip-row">
-        <button type="button" class="chip ${state.hideChecked ? 'active' : ''}" data-action="toggle-hide-checked">${state.hideChecked ? 'Showing unchecked' : 'Hide checked'}</button>
-        <button type="button" class="chip" data-action="build-grocery">Rebuild from meals</button>
-        ${items.some(i => i.checked) ? '<button type="button" class="chip" data-action="clear-checked">Clear checked</button>' : ''}
+      <div class="tile-grid" style="margin-top:12px">
+        <button type="button" class="tile" data-action="build-grocery"><span class="tile-icon">🔄</span><strong>Rebuild</strong><span>From this week's meals</span></button>
+        <button type="button" class="tile" data-action="toggle-hide-checked"><span class="tile-icon">${state.hideChecked ? '👁' : '🙈'}</span><strong>${state.hideChecked ? 'Show Checked' : 'Hide Checked'}</strong><span>${state.hideChecked ? 'Bring them back' : 'While you shop'}</span></button>
+        <button type="button" class="tile" data-action="clear-checked" ${items.some(i => i.checked) ? '' : 'disabled'}><span class="tile-icon">✓</span><strong>Clear Checked</strong><span>Remove what you got</span></button>
+        <button type="button" class="tile tile-danger" data-action="clear-all-groceries" ${items.length ? '' : 'disabled'}><span class="tile-icon">🗑</span><strong>Clear All</strong><span>Empty the whole list</span></button>
       </div>
     </section>
     <section class="panel">
@@ -869,6 +922,7 @@
   function renderModal() {
     if (state.modal.type === 'plan') return renderPlanModal();
     if (state.modal.type === 'mealNight') return renderMealNightSheet();
+    if (state.modal.type === 'filter') return renderFilterSheet();
     if (state.modal.type === 'leftoverPrompt') return renderLeftoverPrompt();
     if (state.modal.type === 'recipeDetail') return renderRecipeDetailModal();
     if (state.modal.type === 'addRecipe') return renderAddRecipeModal();
@@ -880,7 +934,7 @@
 
   function modalShell(title, subtitle, body) {
     return `<div class="modal-backdrop" data-action="modal-backdrop"><section class="modal" role="dialog" aria-modal="true">
-      <div class="modal-head"><div><h2 class="modal-title">${escapeHtml(title)}</h2>${subtitle ? `<div class="modal-subtitle">${escapeHtml(subtitle)}</div>` : ''}</div><button type="button" class="close-btn" data-action="close-modal" aria-label="Close">×</button></div>
+      <div class="modal-head"><div><h2 class="modal-title">${escapeHtml(title)}</h2>${subtitle ? `<div class="modal-subtitle">${escapeHtml(subtitle)}</div>` : ''}</div><button type="button" class="close-btn" data-action="close-modal" aria-label="${state.modalStack.length ? 'Back' : 'Close'}">${state.modalStack.length ? '‹' : '×'}</button></div>
       ${body}
     </section></div>`;
   }
@@ -911,21 +965,21 @@
     const key = state.modal.date;
     const mode = state.modal.mode || 'suggested';
     const q = state.planSearch.trim().toLowerCase();
+    const narrowed = q || filterCount('plan') || filterFor('plan').favoritesOnly;
     let list = [];
     if (mode === 'leftover') list = leftoverCandidates(key);
-    else if (mode === 'favorite') list = sortByName(state.recipes.filter(r => r.favorite));
-    else if (mode === 'all') list = sortByName(state.recipes);
+    else if (narrowed) list = sortByName(state.recipes);
     else list = getRecommendations();
 
-    list = list.filter(r => matchesSearch(r, q) && (state.planTypeFilter === 'All' || dishTypeOf(r) === state.planTypeFilter));
-    if (mode === 'suggested' && !q && state.planTypeFilter === 'All') list = list.slice(0, 12);
+    list = list.filter(r => matchesSearch(r, q) && passesFilter(r, 'plan'));
+    if (mode !== 'leftover' && !narrowed) list = list.slice(0, 12);
     return list;
   }
 
   function pickListInner(list, mode) {
     return list.length
-      ? list.map(r => renderPlanRecipeRow(r, mode === 'leftover')).join('')
-      : '<div class="panel empty-state"><strong>Nothing matches.</strong>Try another search or switch filters.</div>';
+      ? list.map(r => renderRecipeTile(r, 'select-plan-recipe', `data-leftover="${mode === 'leftover' ? 'true' : 'false'}"`)).join('')
+      : '<div class="panel empty-state" style="grid-column:1/-1"><strong>Nothing matches.</strong>Try another search or clear the filter.</div>';
   }
 
   function renderPlanModal() {
@@ -933,45 +987,53 @@
     const date = parseLocalDate(key);
     const current = mealForDate(key);
     const mode = state.modal.mode || 'suggested';
-    const allTypes = dishTypesInUse();
-    if (state.planTypeFilter !== 'All' && !allTypes.includes(state.planTypeFilter)) state.planTypeFilter = 'All';
-
     const list = planPickList();
-    const modes = [['suggested', 'Suggested'], ['favorite', '❤️ Favorites'], ['all', 'All'], ['leftover', '🟡 Leftovers']];
+    const narrowed = state.planSearch.trim() || filterCount('plan') || filterFor('plan').favoritesOnly;
 
     const body = `
-      <div class="sticky-head">
-        <div class="search-row">
-          <input id="plan-search" class="search-input" type="search" placeholder="Search your recipes" value="${escapeHtml(state.planSearch)}" />
-        </div>
-        <div class="chip-row" aria-label="Recipe source">
-          ${modes.map(([value, label]) => `<button type="button" class="chip ${mode === value ? 'active' : ''}" data-action="plan-mode" data-mode="${value}">${label}</button>`).join('')}
-        </div>
-        <div class="chip-row" aria-label="Filter by dish type">
-          ${['All', ...allTypes].map(type => `<button type="button" class="chip ${state.planTypeFilter === type ? 'active' : ''}" data-action="plan-type" data-type="${escapeHtml(type)}">${escapeHtml(type)}</button>`).join('')}
-        </div>
+      ${renderFilterBar('plan')}
+      <div class="list-head">
+        <h3>${mode === 'leftover' ? 'Planned earlier this week' : narrowed ? 'Matches' : 'Suggested'}</h3>
+        <span>${list.length} ${list.length === 1 ? 'recipe' : 'recipes'}</span>
       </div>
-      <div class="pick-list">${pickListInner(list, mode)}</div>
+      <div class="recipe-grid pick-list">${pickListInner(list, mode)}</div>
       <div class="sheet-section">
         <h3>Other options</h3>
         <div class="tile-grid tile-grid-3">
+          ${mode === 'leftover'
+            ? '<button type="button" class="tile" data-action="plan-mode" data-mode="suggested"><span class="tile-icon">↩</span><strong>All Recipes</strong></button>'
+            : '<button type="button" class="tile" data-action="plan-mode" data-mode="leftover"><span class="tile-icon">🟡</span><strong>Leftovers</strong></button>'}
           <button type="button" class="tile" data-action="set-eatout"><span class="tile-icon">🥡</span><strong>Eating Out</strong></button>
           <button type="button" class="tile" data-action="add-recipe"><span class="tile-icon">＋</span><strong>New Recipe</strong></button>
-          ${current
-            ? '<button type="button" class="tile tile-danger" data-action="clear-day"><span class="tile-icon">×</span><strong>Clear Day</strong></button>'
-            : '<button type="button" class="tile" data-action="close-modal"><span class="tile-icon">↩</span><strong>Cancel</strong></button>'}
+          ${current ? '<button type="button" class="tile tile-danger" data-action="clear-day"><span class="tile-icon">×</span><strong>Clear Day</strong></button>' : ''}
         </div>
       </div>`;
     return modalShell(`Plan ${date.toLocaleDateString(undefined, { weekday: 'long' })}`, date.toLocaleDateString(undefined, { month: 'long', day: 'numeric' }), body);
   }
 
-  function renderPlanRecipeRow(recipe, leftover = false) {
-    const total = Number(recipe.prep_minutes || 0) + Number(recipe.cook_minutes || 0);
-    const reason = leftover ? 'Planned earlier this week' : `${dishTypeOf(recipe)} · ${total || '?'} min`;
-    return `<button type="button" class="pick-row" data-action="select-plan-recipe" data-recipe-id="${recipe.id}" data-leftover="${leftover ? 'true' : 'false'}">
-      <span><strong>${escapeHtml(recipe.name)}</strong><small>${escapeHtml(reason)}${recipe.favorite ? ' · ❤️' : ''}</small></span>
-      <span class="pick-go">${leftover ? 'Use' : 'Pick'}</span>
-    </button>`;
+  function renderFilterSheet() {
+    const context = state.modal.context || 'recipes';
+    const f = filterFor(context);
+    const types = dishTypesInUse();
+    const body = `
+      <div class="sheet-section">
+        <h3>Dish type</h3>
+        <div class="filter-options">
+          ${types.length ? types.map(type => `<button type="button" class="filter-option ${f.types.includes(type) ? 'active' : ''}" data-action="filter-type" data-context="${context}" data-type="${escapeHtml(type)}"><span class="filter-check">${f.types.includes(type) ? '✓' : ''}</span>${escapeHtml(type)}</button>`).join('') : '<p class="form-help">No dish types yet.</p>'}
+        </div>
+        <p class="form-help">Pick as many as you want. New categories show up here automatically.</p>
+      </div>
+      <div class="sheet-section">
+        <h3>Total time</h3>
+        <div class="filter-list">
+          ${TIME_OPTIONS.map(([value, label]) => `<button type="button" class="filter-row ${f.time === value ? 'active' : ''}" data-action="filter-time" data-context="${context}" data-time="${value}"><span>${label}</span><span class="filter-check">${f.time === value ? '✓' : ''}</span></button>`).join('')}
+        </div>
+      </div>
+      <div class="sheet-section note-actions">
+        <button type="button" class="btn btn-outline" data-action="filter-clear" data-context="${context}">Clear Filter</button>
+        <button type="button" class="btn btn-primary" data-action="close-modal">Done</button>
+      </div>`;
+    return modalShell('Filter', 'Narrow the list down', body);
   }
 
   function renderMealNightSheet() {
@@ -1107,7 +1169,7 @@
   function renderRecommendWeekModal() {
     const picks = getRecommendations().slice(0, 4);
     const body = `<p class="section-subtitle" style="margin-bottom:12px">These are weighted toward short prep, healthy ingredients, lean protein, fresh vegetables, your favorite cuisines, and meals worth eating again tomorrow.</p>
-      <div class="pick-list">${picks.map(r => renderPlanRecipeRow(r, false)).join('')}</div>`;
+      <div class="recipe-grid">${picks.map(r => renderRecipeTile(r, 'select-plan-recipe', 'data-leftover="false"')).join('')}</div>`;
     return modalShell('Good fits for this week', 'Pick one and then choose the day.', body);
   }
 
@@ -1161,42 +1223,55 @@
     const action = button.dataset.action;
 
     try {
-      if (action === 'nav') { state.view = button.dataset.view; state.modal = null; render(); window.scrollTo(0, 0); return; }
+      if (action === 'nav') { state.view = button.dataset.view; resetModals(); render(); window.scrollTo(0, 0); return; }
       if (action === 'open-meal') { state.modal = { type: 'mealNight', date: button.dataset.date }; render(); return; }
       if (action === 'save-note') { await saveMealNote(); return; }
       if (action === 'note-to-grocery') { await sendNoteToGrocery(); return; }
       if (action === 'leftovers-tomorrow') { await addLeftoverAfter(button.dataset.date, button.dataset.recipeId); return; }
-      if (action === 'plan-type') { state.planTypeFilter = button.dataset.type || 'All'; render(); return; }
-      if (action === 'recipe-favorites') { state.recipeFavoritesOnly = !state.recipeFavoritesOnly; render(); return; }
+      if (action === 'open-filter') { pushModal({ type: 'filter', context: button.dataset.context || 'recipes' }); render(); return; }
+      if (action === 'toggle-favorites-filter') { const f = filterFor(button.dataset.context); f.favoritesOnly = !f.favoritesOnly; render(); return; }
+      if (action === 'filter-type') {
+        const f = filterFor(button.dataset.context); const type = button.dataset.type;
+        f.types = f.types.includes(type) ? f.types.filter(t => t !== type) : [...f.types, type];
+        render(); return;
+      }
+      if (action === 'filter-time') { filterFor(button.dataset.context).time = button.dataset.time || 'any'; render(); return; }
+      if (action === 'filter-clear') { state.filters[button.dataset.context] = { types: [], time: 'any', favoritesOnly: false }; render(); return; }
+      if (action === 'clear-all-groceries') { await clearAllGroceries(); return; }
       if (action === 'toggle-hide-checked') { state.hideChecked = !state.hideChecked; render(); return; }
       if (action === 'previous-week') { state.weekStart = addDays(state.weekStart, -7); render(); return; }
       if (action === 'next-week') { state.weekStart = addDays(state.weekStart, 7); render(); return; }
-      if (action === 'plan-date') { state.planSearch = ''; state.planTypeFilter = 'All'; state.modal = { type: 'plan', date: button.dataset.date, mode: 'suggested' }; render(); window.scrollTo(0, 0); return; }
-      if (action === 'close-modal') { state.modal = null; render(); return; }
-      if (action === 'modal-backdrop' && event.target === button) { state.modal = null; render(); return; }
+      if (action === 'plan-date') {
+        state.planSearch = '';
+        state.filters.plan = { types: [], time: 'any', favoritesOnly: false };
+        const next = { type: 'plan', date: button.dataset.date, mode: 'suggested' };
+        if (state.modal && state.modal.type === 'mealNight') pushModal(next); else resetModals(next);
+        render(); window.scrollTo(0, 0); return;
+      }
+      if (action === 'close-modal') { popModal(); render(); return; }
+      if (action === 'modal-backdrop' && event.target === button) { resetModals(); render(); return; }
       if (action === 'plan-mode') { state.modal.mode = button.dataset.mode; render(); return; }
       if (action === 'set-eatout') { await setEatingOut(); return; }
-      if (action === 'clear-day') { await store.deleteMeal(state.modal.date); await reloadData(); state.modal = null; render(); toast('Day cleared'); return; }
+      if (action === 'clear-day') { await store.deleteMeal(state.modal.date); await reloadData(); resetModals(); render(); toast('Day cleared'); return; }
       if (action === 'select-plan-recipe') { if (state.modal?.type === 'recommendWeek') { state.modal = { type: 'chooseDay', recipeId: button.dataset.recipeId }; render(); } else { await selectPlanRecipe(button.dataset.recipeId, button.dataset.leftover === 'true'); } return; }
       if (action === 'add-leftover-next') { await addLeftoverNext(); return; }
-      if (action === 'recipe-type') { state.recipeTypeFilter = button.dataset.type || 'All'; render(); return; }
       if (action === 'import-recipekeeper-confirm') { await importRecipeKeeperConfirmed(); return; }
       if (action === 'add-recipe') { state.modal = { type: 'addRecipe' }; render(); return; }
       if (action === 'manual-recipe') { state.modal = { type: 'addRecipe', mode: 'manual' }; render(); return; }
       if (action === 'import-recipe-mode') { state.modal = { type: 'addRecipe', mode: 'import' }; render(); return; }
-      if (action === 'view-recipe') { state.modal = { type: 'recipeDetail', recipeId: button.dataset.recipeId }; render(); return; }
+      if (action === 'view-recipe') { pushModal({ type: 'recipeDetail', recipeId: button.dataset.recipeId }); render(); return; }
       if (action === 'edit-recipe') { state.modal = { type: 'addRecipe', mode: 'edit', recipeId: button.dataset.recipeId }; render(); return; }
       if (action === 'duplicate-recipe') { duplicateRecipeDraft(button.dataset.recipeId); return; }
       if (action === 'delete-recipe') { await deleteRecipe(button.dataset.recipeId); return; }
       if (action === 'plan-recipe') { state.modal = { type: 'chooseDay', recipeId: button.dataset.recipeId }; render(); return; }
       if (action === 'choose-day-for-recipe') { await planRecipeOnDate(state.modal.recipeId, button.dataset.date, true); return; }
       if (action === 'toggle-favorite') { await toggleFavorite(button.dataset.recipeId); return; }
-      if (action === 'build-grocery') { await buildGroceryList(); state.view = 'grocery'; state.modal = null; render(); toast('Grocery list updated'); return; }
+      if (action === 'build-grocery') { await buildGroceryList(); state.view = 'grocery'; resetModals(); render(); toast('Grocery list updated'); return; }
       if (action === 'clear-checked') { await store.clearChecked(weekKey()); await reloadData(); render(); return; }
       if (action === 'delete-grocery') { await store.deleteGrocery(button.dataset.id); await reloadData(); render(); return; }
       if (action === 'toggle-grocery' && button.matches('input')) { await toggleGrocery(button.dataset.id, button.checked); return; }
       if (action === 'recommend-week') { state.modal = { type: 'recommendWeek' }; render(); return; }
-      if (action === 'cook') { state.modal = null; state.cook = { recipeId: button.dataset.recipeId, step: 0, finished: false }; render(); return; }
+      if (action === 'cook') { resetModals(); state.cook = { recipeId: button.dataset.recipeId, step: 0, finished: false }; render(); return; }
       if (action === 'cook-prev') { state.cook.step = Math.max(0, state.cook.step - 1); render(); return; }
       if (action === 'cook-next') {
         const recipe = recipeById(state.cook.recipeId);
@@ -1218,7 +1293,7 @@
   function handleInput(event) {
     if (event.target.id === 'recipe-search') {
       state.recipeSearch = event.target.value;
-      const list = document.querySelector('.recipe-list');
+      const list = document.querySelector('.recipe-grid');
       const head = document.querySelector('.list-head');
       if (!list || !head) { render(); return; }
       const recipes = filteredRecipes();
@@ -1229,8 +1304,11 @@
     if (event.target.id === 'plan-search') {
       state.planSearch = event.target.value;
       const list = document.querySelector('.pick-list');
+      const head = document.querySelector('.modal .list-head span');
       if (!list) { render(); return; }
-      list.innerHTML = pickListInner(planPickList(), state.modal?.mode || 'suggested');
+      const picks = planPickList();
+      if (head) head.textContent = `${picks.length} ${picks.length === 1 ? 'recipe' : 'recipes'}`;
+      list.innerHTML = pickListInner(picks, state.modal?.mode || 'suggested');
       return;
     }
     if (event.target.id === 'meal-note' && state.modal) {
@@ -1271,7 +1349,7 @@
     const recipes = state.modal?.type === 'recipeKeeperPreview' ? (state.modal.recipes || []) : [];
     if (!recipes.length) return;
     const count = recipes.length;
-    state.modal = null;
+    resetModals();
     render();
     toast(`Importing ${count} recipes…`);
     await store.saveRecipes(recipes);
@@ -1326,11 +1404,12 @@
 
   async function setEatingOut() {
     await store.upsertMeal({ meal_date: state.modal.date, type: 'eatout', recipe_id: null, label: 'Eating Out' });
-    await reloadData(); state.modal = null; render(); toast('Eating out added');
+    await reloadData(); resetModals(); render(); toast('Eating out added');
   }
 
   async function selectPlanRecipe(recipeId, leftover) {
     const date = state.modal.date;
+    state.modalStack = [];
     await planRecipeOnDate(recipeId, date, !leftover, leftover);
   }
 
@@ -1339,16 +1418,16 @@
     await store.upsertMeal({ meal_date: date, type: leftover ? 'leftover' : 'meal', recipe_id: recipeId, label: recipe?.name || '' });
     await reloadData();
     if (offerLeftovers && !leftover) state.modal = { type: 'leftoverPrompt', date, recipeId };
-    else state.modal = null;
+    else resetModals();
     render();
   }
 
   async function addLeftoverNext() {
     const nextKey = dateKey(addDays(parseLocalDate(state.modal.date), 1));
-    if (mealForDate(nextKey)) { state.modal = null; render(); return; }
+    if (mealForDate(nextKey)) { resetModals(); render(); return; }
     const recipe = recipeById(state.modal.recipeId);
     await store.upsertMeal({ meal_date: nextKey, type: 'leftover', recipe_id: state.modal.recipeId, label: recipe?.name || '' });
-    await reloadData(); state.modal = null; render(); toast('Tomorrow set to leftovers');
+    await reloadData(); resetModals(); render(); toast('Tomorrow set to leftovers');
   }
 
   async function addLeftoverAfter(dateKeyValue, recipeId) {
@@ -1356,7 +1435,7 @@
     if (mealForDate(nextKey)) { toast('That day already has a plan'); return; }
     const recipe = recipeById(recipeId);
     await store.upsertMeal({ meal_date: nextKey, type: 'leftover', recipe_id: recipeId, label: recipe?.name || '' });
-    await reloadData(); state.modal = null; render(); toast('Tomorrow set to leftovers');
+    await reloadData(); resetModals(); render(); toast('Tomorrow set to leftovers');
   }
 
   function currentNoteDraft() {
@@ -1489,7 +1568,7 @@
     await store.deleteRecipe(recipeId);
     await reloadData();
     for (const weekStart of weeks) await buildGroceryListForWeek(weekStart);
-    state.modal = null;
+    resetModals();
     render();
     toast('Recipe deleted');
   }
@@ -1557,6 +1636,16 @@
     item.checked = checked;
     render();
     await store.saveGrocery({ ...item, checked });
+  }
+
+  async function clearAllGroceries() {
+    const items = currentWeekGroceries();
+    if (!items.length) return;
+    if (!confirm(`Clear all ${items.length} items from this week's grocery list? This cannot be undone.`)) return;
+    await store.clearWeek(weekKey());
+    await reloadData();
+    render();
+    toast('Grocery list cleared');
   }
 
   async function rateRecipe(rating) {
