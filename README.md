@@ -1,58 +1,193 @@
-# RDG Site Visit v13
+# Mealz V6
 
-The start-page STORAGE disclosure is collapsed by default and contains Open recovery file, Review phone storage, Save all app data, and Restore backup.
+A shared dinner planner and recipe keeper built for phones first.
 
-## Install
-1. Save a backup of current work before updating.
-2. Replace the files in your existing GitHub repository and let Vercel redeploy. Keep the SAME website address. Include cloud.js and the new archive.js file.
-3. In the app, use Check for update. Return to Start and reopen the app. Confirm Build v13.
+**Main loop:** Plan the week, pick a recipe, add notes, shop, cook.
 
-## Save a visit to iCloud Drive
-1. Complete the visit. Open it from Past visits and tap Save to Cloud.
-2. Tap Save ZIP to Cloud when you are ready and on Wi-Fi.
-3. On iPhone choose Save to Files, then iCloud Drive, and select your project folder. If sharing is unavailable, use Download ZIP and move it from Downloads to iCloud Drive.
-4. Check the ZIP finishes uploading in Files. Extract it to reveal the SVR folder and its contents.
-5. Download the ZIP or extracted files to your server when convenient.
+## New in V6
 
-One ZIP contains everything. SVR-001.zip extracts to:
+### Look
+New highlight color, #FF8200. Backgrounds are white and bright, lines are lighter, and the tagline is now "plan, eat, survive". The app icon is the skull with fork and knife, recolored onto the orange background.
 
-| Folder | Contents |
-|---|---|
-| SVR-001/Report/ | Word report |
-| SVR-001/Photos/ | Individual photos named by observation number |
-| SVR-001/Photo-Index/ | CSV index with photo notes, time, locations and tags |
-| SVR-001/Recovery/ | Dated project recovery JSON |
+### Recipes are tiles
+Both the Recipes page and the Swap picker now use the same two column tile grid. Each tile has a colored block by dish type, the name, and the total time. When photos arrive later, they drop into that colored block with no other change.
 
-Keep each project's ZIPs in its own project folder. Further visits use SVR-002, SVR-003, etc. If saving a revised copy of the same visit, choose deliberately whether to replace or retain the prior ZIP in Files. No archive is overwritten by the app itself.
+### One Filter button
+The rows of chips are gone. Both pages have Search, a Filter button, and a heart toggle for favorites. Filter opens a sheet with dish type, where you can select as many as you want, and total time. The dish type list is built from your recipes, so new categories appear on their own. The count on the button shows how many filters are active.
 
-The recovery file contains the selected project's CURRENT available photo and visit history snapshot, including recurring-item history. It is not limited to the exported visit. Keep older recovery files if their photos have been removed locally; a newer snapshot cannot recreate those removed photos. To restore, extract the ZIP and select the JSON inside Recovery.
+### Back goes back
+Opening a recipe from a meal night now returns you to that meal night. The close button turns into a back arrow whenever there is somewhere to go back to.
 
-Draft visits can be exported; complete and save again for final records. A complete visit archive cannot be generated if its photos have been removed locally: use its earlier saved ZIP or restore its recovery file first. Empty-photo visits still include a Photos folder.
+### Grocery
+The controls at the top are tiles: Rebuild, Hide Checked, Clear Checked, and Clear All. Clear All asks first.
 
-The app does not detect Wi-Fi or upload automatically. Your phone handles uploading after Save to Files. The optional confirmation button records YOUR check, not automatic verification.
+### Two layout fixes
+The filter row was pushing about 28 pixels past the screen edge, which cut off the last options. Fixed. The wide screen layout is now locked to devices with a real pointer, so an iPhone cannot fall into the desktop layout even if Safari is set to request the desktop site.
 
-## Clean up phone storage
-- A notice appears when a completed visit is at least 30 days past completion and has removable photos. Older visits without a completion timestamp use the visit date.
-- Choose Review phone storage, then Save / review files first or Remove local photos.
-- Removal requires an explicit confirmation that the report, photos and recovery file are safely saved in your cloud or server. Nothing is deleted automatically.
-- Project details, visit numbering, notes and item history stay on the device. Photos supporting currently open items stay too. Retained photos can be removed later once the items are closed.
-- After removal, old observations show a clear placeholder. Use the cloud report or restore a recovery file containing those photos to rebuild the old report.
+## Installing V6
 
-## Restore a project
-From Start, expand STORAGE and choose Open recovery file and select its JSON file in Files. If the project already exists, confirmation explains that this replaces its current visits, including newer work. Save current work first. Other projects are preserved. This restores a snapshot; it does not merge newer work.
+1. Replace `app.js`, `styles.css`, `index.html`, `manifest.webmanifest`, `apple-touch-icon.png`, and `README.md`, and add `icon-192.png`, `icon-512.png`, and `icon-maskable-512.png`.
+2. Delete `icon.svg` from the repo. Nothing points at it now.
+3. Leave `config.js` alone.
+4. Commit, let Vercel redeploy, then refresh on your phone. To see the new icon on your home screen, delete the old Mealz icon and add it again from Safari.
 
-STORAGE also contains Save all app data and Restore backup for full-device recovery. Restore backup replaces ALL app projects. v9/v10/v11 version-1 backups remain supported. v13 files with removed-photo records require v13 or newer.
+No database changes in V6.
 
-## Photo quality
-Requests a 3840 x 2160 camera stream where supported, removes the old 1600-pixel capture cap and saves JPEGs at quality 0.92. Actual resolution depends on the device and browser. These are camera-stream captures, not guaranteed full sensor originals. Existing photos cannot gain lost detail. Word reports use smaller copies without changing stored photos.
+## New in V5
 
-## Verification
-JavaScript syntax and local data checks passed, covering project recovery, exact saved photo bytes, ID remapping, preservation of other projects, cancelled restore/share, corrupt recovery rejection, legacy backups, 30-day cleanup boundaries and protection of open-item evidence. Tests use a simulated database transaction layer, not a physical iPhone.
+### Built for the phone
+The layout is now phone first. Wide screens are the exception instead of the default, so the app no longer renders at desktop width and shrinks to fit on an iPhone. Type is larger, tap targets are bigger, and the bottom bar is anchored to the bottom edge with room for the home indicator.
 
-Browser preview access was denied in this session. The iPhone camera, native share sheet and iCloud handoff need a device check before field use. Try one test visit, save all groups, check the cloud files and open the project recovery file on another device before removing important local photos.
+### Tonight card removed
+The week is the only planning surface now. Every day is a full width row you can tap.
 
-For repeatable local checks with Node.js 22 or newer:
-- node tests/storage-checks.cjs
-- node tests/archive-checks.cjs
+### Tap a meal to open it
+Tapping a planned meal opens a meal sheet for that night. It shows the meal, a notes box, and a grid of actions: Recipe, Cook, Swap, Leftovers, Clear.
 
-ZIP output was also opened with an independent Python ZIP reader: checksums, Unicode filenames, folder entries and exact file bytes passed.
+### Notes on a planned meal
+Either of you can open a night and add notes such as "potatoes as a side" or "red and yellow bell peppers". Notes are shared, they show on the calendar under the meal name, and a Send to Grocery button drops the note straight onto the grocery list.
+
+### Plan screen is recipe selection
+Tapping Plan on a day opens straight into choosing a recipe. A search box sits at the top, with filter chips for Suggested, Favorites, All, Leftovers, and one for each dish type. Eating Out, New Recipe, and Clear Day moved to small tiles below the results so they stop competing with the main job.
+
+### Recipe library redesigned
+Recipes are now compact rows with a dish type icon, name, type, time, and a favorite toggle. The search and filter bar stays pinned at the top while you scroll. Filters include favorites and every dish type in your collection.
+
+### Faster and steadier
+Typing in either search box no longer rebuilds the screen, so the keyboard and your place in the list stay put. Checking off groceries and tapping a favorite now respond immediately instead of waiting on the database. Scroll position survives a redraw.
+
+### Grocery list
+The list shows how many items are still to get, and a chip hides checked items while you shop.
+
+## Installing V5
+
+1. Run `supabase-v5.sql` once in Supabase, SQL Editor. It adds the notes column used by meal notes.
+2. Do not delete or replace your existing `config.js` in GitHub. This update ZIP intentionally does not include it.
+3. Replace `app.js`, `styles.css`, and `README.md`, and add `supabase-v5.sql`.
+4. Commit, let Vercel redeploy, then refresh once on each phone.
+
+If the app still looks zoomed out on your iPhone, open it in Safari, tap the aA menu in the address bar, and choose Request Mobile Website. Then use Share, Add to Home Screen so it opens as an app.
+
+## New in V4
+
+### Stay signed in
+Shared Mealz now explicitly uses persistent Supabase sessions. After you sign in on a phone, Mealz should keep that household session until you deliberately choose **More → Sign Out**.
+
+### Stronger This Week calendar
+The weekly calendar has been promoted visually so **This Week** has similar hierarchy to **Tonight**. It remains the main planning surface for the next seven days.
+
+### Recipes organized by dish type
+Recipes are grouped and filterable by dish/protein type, including defaults such as:
+
+- Chicken
+- Beef
+- Pork
+- Turkey
+- Seafood
+- Lamb
+- Vegetarian
+- Pasta
+- Soup
+- Other
+
+When adding or editing a recipe, Mealz prompts for **Dish type**. The field remembers types already used in your recipe collection. You can select an existing one or simply type a new one.
+
+### Recipe Keeper bulk import
+The Recipes screen now has **Import Recipe Keeper**.
+
+Mealz accepts either:
+
+- the `.zip` exported by Recipe Keeper, or
+- the `recipes.html` file inside that export.
+
+The file is parsed in the browser. Mealz imports usable recipe text directly into your shared Mealz database and skips recipes whose names already exist.
+
+Imported data includes:
+
+- recipe name
+- ingredients
+- directions
+- prep/cook times when available
+- favorites
+- rating signal when available
+- Recipe Keeper course/category labels
+- source URL when available
+- inferred dish/protein type
+
+**Recipe photos are not imported in V4.**
+
+## Existing features
+
+- Visual Monday–Sunday planner
+- Color-coded planned meals, quick meals, leftovers, new recipes, and open nights
+- Specific-day meal planning
+- One-tap next-day leftovers
+- Shared household database through Supabase
+- Recipe add/edit/rename/duplicate/delete
+- Clean recipe import from a website URL
+- Automatic categorized grocery list
+- Manual grocery additions
+- Shared grocery check-off state
+- Step-by-step cooking mode
+- Make Again / Fine / Skip rating
+- Rule-based recommendations
+- iPhone Home Screen support
+- Accidental double-tap zoom suppression while retaining pinch zoom
+
+## Upgrading from V3
+
+**No new Supabase SQL is required for V4.** Dish type is stored inside the existing recipe tag data, so your current shared database continues to work.
+
+To update:
+
+1. **Do not delete or replace your existing `config.js` in GitHub.** It contains the Supabase connection you already set up.
+2. Upload/replace the other V4 files and folders. This update ZIP intentionally does not include `config.js`.
+3. Commit the changes.
+4. Let Vercel redeploy.
+5. Open Mealz and refresh once on each phone.
+
+## Import your existing Recipe Keeper collection
+
+After V4 is deployed:
+
+1. Open Recipe Keeper.
+2. Use its backup/import-export area to export your recipes as the Recipe Keeper `.zip` file.
+3. Open **Mealz → Recipes**.
+4. Tap **Import Recipe Keeper**.
+5. Choose the exported `.zip`.
+6. Mealz shows a preview and tells you how many recipes are ready to import.
+7. Tap **Import Recipes**.
+
+Mealz skips exact recipe-name duplicates rather than creating copies.
+
+## Files
+
+- `index.html` — app shell and browser libraries
+- `styles.css` — mobile-first UI
+- `app.js` — Mealz application behavior
+- `api/import-recipe.js` — Vercel function for website recipe import
+- `lib/recipe-parser.js` — server-side clean URL recipe parser
+- `lib/recipekeeper-client.js` — browser-side Recipe Keeper bulk importer
+- `config.js` — your existing Supabase connection file (intentionally not included in the V4 update ZIP)
+- `supabase-setup.sql` — initial database setup (no need to rerun for V4)
+- `manifest.webmanifest` — installable app settings
+- `icon.svg` / `apple-touch-icon.png` — app icons
+- `package.json` / `vercel.json` — deployment settings
+
+## Current intentional limits
+
+- Recipe Keeper photos are not imported yet.
+- Ingredient quantity combining remains conservative rather than guessing unit conversions.
+- No pantry inventory.
+- One household login rather than individual profiles.
+- Recommendations are still rules-based, but imported favorites and future Mealz meal history make them increasingly useful.
+
+## Good next additions
+
+1. Recipe photos, imported from the Recipe Keeper export into Supabase storage
+2. Offline support so the grocery list works in a store with weak signal
+3. Cooked history, so you can filter by what you have not made in a while
+4. Prep ahead mode that combines prep across the week's meals
+5. Serving and leftover scaling
+
+The product rule stays the same: **make dinner planning easier, not make the app more complicated.**

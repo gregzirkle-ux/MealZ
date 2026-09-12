@@ -1,431 +1,1669 @@
-'use strict';
-const BUILD='v14';
-const $=s=>document.querySelector(s);
-const TAGS=['Observation','Issue','Action','Safety'];
-const NOTE_KEYS=['note','tag','area','sheet','owner','due','itemId'];
-const STORES=['visits','photos','meta','projects'];
-let db,stream,track,visit=null,pending=null,projects=[],allVisits=[],selectedProject=null;
-let area='',recent=[],count=0,busy=false,cur=null,lastId=null,undoTimer=null,reviewing=false;
-let nativeZoom=null,zoom=1,maxZoom=5,captureTask=Promise.resolve(),readyBlob=null,readyName='',detailUrl=null;
-let urls=[],itemUrls=[],editingItem=null,itemsFromStart=false;
-const svr=n=>'SVR '+String(n).padStart(3,'0');
-const dateInput=ts=>{const d=new Date(ts);return [d.getFullYear(),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0')].join('-');};
-const fmt=ts=>new Date(ts).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
-function showError(e){console.error(e);alert((e&&e.message?e.message:String(e))+' Please try again.');}
-let actionQueue=Promise.resolve();
-function safe(fn){return (...args)=>{const task=actionQueue.then(()=>fn(...args));actionQueue=task.catch(showError);return actionQueue;};}
-function on(id,fn){$(id).onclick=safe(fn);}
-function clone(x){return structuredClone(x);}
-function stored(key,fallback){try{return JSON.parse(localStorage.getItem(key))??fallback;}catch{return fallback;}}
-function remember(key,value){try{localStorage.setItem(key,JSON.stringify(value));}catch{}}
-function openDB(){return new Promise((resolve,reject)=>{
- const req=indexedDB.open('rdg-sitevisit',4);
- req.onupgradeneeded=()=>{
-  const d=req.result,tx=req.transaction;
-  for(const name of STORES){if(!d.objectStoreNames.contains(name))d.createObjectStore(name,{keyPath:'id',autoIncrement:name!=='meta'});}
-  const photos=tx.objectStore('photos');
-  if(!photos.indexNames.contains('visitId'))photos.createIndex('visitId','visitId');
-  const visits=tx.objectStore('visits');
-  if(!visits.indexNames.contains('projectId'))visits.createIndex('projectId','projectId');
- };
- req.onsuccess=()=>{const d=req.result;d.onversionchange=()=>{d.close();alert('An app update is ready. Close and reopen this app.');};resolve(d);};
- req.onerror=()=>reject(req.error);req.onblocked=()=>alert('Close other tabs of Site Visit, then reopen this page.');
-});}
-function transaction(names,mode,work){return new Promise((resolve,reject)=>{
- const tx=db.transaction(names,mode);let result;
- tx.oncomplete=()=>resolve(typeof result==='function'?result():result);
- tx.onerror=()=>reject(tx.error||new Error('Could not save data.'));
- tx.onabort=()=>reject(tx.error||new Error('The save was interrupted.'));
- try{result=work(tx);}catch(e){tx.abort();reject(e);}
-});}
-function read(name,key,index){return transaction([name],'readonly',tx=>{
- const s=index?tx.objectStore(name).index(index):tx.objectStore(name);
- const q=key===undefined?s.getAll():s.get(key);return ()=>q.result;
-});}
-function getMany(name,index,key){return transaction([name],'readonly',tx=>{const q=tx.objectStore(name).index(index).getAll(key);return ()=>q.result;});}
-function put(name,r){return transaction([name],'readwrite',tx=>{const q=tx.objectStore(name).put(r);return ()=>q.result;});}
-const allV=()=>read('visits'),oneP=id=>read('photos',id),oneM=id=>read('meta',id),putV=v=>put('visits',v);
-function joinMeta(pr,mr){const out={id:pr.id,visitId:pr.visitId,ts:pr.ts,blob:pr.blob};NOTE_KEYS.forEach(k=>out[k]=mr&&Object.prototype.hasOwnProperty.call(mr,k)?mr[k]:(pr[k]||''));return out;}
-async function photosFor(id){const ps=await getMany('photos','visitId',id);return transaction(['meta'],'readonly',tx=>{
- const requests=ps.map(p=>tx.objectStore('meta').get(p.id));
- return ()=>ps.map((p,i)=>joinMeta(p,requests[i].result)).sort((a,b)=>a.ts-b.ts);
-});}
-const visitPhotos=()=>visit?photosFor(visit.id):Promise.resolve([]);
-function countFor(id){return transaction(['photos'],'readonly',tx=>{const q=tx.objectStore('photos').index('visitId').count(id);return ()=>q.result;});}
-function savePhoto(vid,ts,blob,shotArea){return transaction(['photos','meta'],'readwrite',tx=>{
- const q=tx.objectStore('photos').add({visitId:vid,ts,blob});
- q.onsuccess=()=>tx.objectStore('meta').add({id:q.result,note:'',tag:'',area:shotArea,sheet:'',owner:'',due:'',itemId:''});
- return ()=>q.result;
-});}
-function editable(){if(!visit||visit.closed)throw new Error('This visit is complete. Its report history is read only.');}
-async function persistVisit(next){await putV(next);if(visit&&visit.id===next.id)visit=next;readyBlob=null;}
-async function deletePhoto(id){editable();const next=clone(visit);
- if(next.items.some(i=>i.photoId===id))throw new Error('This photo is the original evidence for a tracked item. Keep it with the item history.');
- next.items.forEach(i=>i.followupPhotoIds=(i.followupPhotoIds||[]).filter(p=>p!==id));
- await transaction(['photos','meta','visits'],'readwrite',tx=>{tx.objectStore('photos').delete(id);tx.objectStore('meta').delete(id);tx.objectStore('visits').put(next);});visit=next;readyBlob=null;
-}
-function dueValue(value,ts){if(value==='One week'||value==='Two weeks'){const d=new Date(ts);d.setDate(d.getDate()+(value==='One week'?7:14));return dateInput(d);}return value||'';}
-function newItem(v,data={}){v.itemSeq=(v.itemSeq||0)+1;return {id:'item:'+v.id+':'+v.itemSeq,ref:String(v.num).padStart(3,'0')+'.'+String(v.itemSeq).padStart(2,'0'),originVisitId:v.id,firstVisitNum:v.num,firstNoted:v.date,note:'',owner:'',due:'',area:'',status:'New',update:'',photoId:null,followupPhotoIds:[],...data};}
-async function migrate(){
- const vs=(await allV()).sort((a,b)=>a.id-b.id),ps=await read('projects');
- if(vs.every(v=>v.schema===9))return;
- const grouped=new Map(ps.map(p=>[p.key,p]));let nextProject=Math.max(0,...ps.map(p=>p.id))+1;
- for(const v of vs){if(v.schema===9)continue;
-  const key=(v.projNum?'number:'+v.projNum.trim().toLowerCase():'name:'+(v.project||'Unassigned project').trim().toLowerCase());
-  if(!grouped.has(key))grouped.set(key,{id:nextProject++,key,name:v.project||'Unassigned project',number:v.projNum||''});
-  v.projectId=grouped.get(key).id;v.items=[];v.itemSeq=0;
-  for(const r of await photosFor(v.id))if(r.tag==='Issue'||r.tag==='Action')v.items.push(newItem(v,{photoId:r.id,note:r.note,owner:r.owner,due:dueValue(r.due,v.date),area:r.area,firstNoted:r.ts}));
-  v.closed=!!(v.closed||v.exported);if(v.closed)v.legacyReportItems=clone(v.items);v.schema=9;
- }
- // Preserve all previous report numbers. Only future numbers become project specific.
- for(const p of grouped.values()){
-  const pv=vs.filter(v=>v.projectId===p.id).sort((a,b)=>a.id-b.id);let carried=[];
-  for(const v of pv){const own=v.items.filter(i=>i.originVisitId===v.id);v.items=[...carried.filter(i=>i.status!=='Closed').map(i=>({...clone(i),status:'Not reviewed',update:''})),...own];carried=v.items;}
-  const active=pv.filter(v=>!v.closed);active.slice(0,-1).forEach(v=>{v.closed=true;v.migrationNote='Earlier unfinished visit preserved as complete during upgrade.';});
- }
- await transaction(['projects','visits'],'readwrite',tx=>{grouped.forEach(p=>tx.objectStore('projects').put(p));vs.forEach(v=>tx.objectStore('visits').put(v));});
-}
-function currentProject(){return projects.find(p=>p.id===selectedProject);}
-async function loadState(){
- projects=(await read('projects')).sort((a,b)=>a.name.localeCompare(b.name));allVisits=(await allV()).sort((a,b)=>a.id-b.id);
- if(!projects.some(p=>p.id===selectedProject))selectedProject=projects.some(p=>p.id===stored('selectedProject',null))?stored('selectedProject',null):projects[0]?.id||null;
- pending=allVisits.filter(v=>v.projectId===selectedProject&&!v.closed).pop()||null;
- remember('selectedProject',selectedProject);await paintStart();await paintCleanupNotice();
-}
-async function paintStart(){
- const select=$('#projectSelect');select.replaceChildren();
- if(!projects.length)select.add(new Option('Add your first project',''));
- projects.forEach(p=>select.add(new Option(p.name+(p.number?' · '+p.number:''),p.id)));
- select.value=selectedProject==null?'':String(selectedProject);
- $('#selectedProjectName').textContent=currentProject()?.name||'No project selected';
- const pv=allVisits.filter(v=>v.projectId===selectedProject),nextNum=Math.max(0,...pv.map(v=>v.num))+1;
- $('#sDate').textContent=new Date().toLocaleDateString();$('#sBuild').textContent='Build '+BUILD;
- $('#sState').textContent=pending?svr(pending.num)+' is in progress.':projects.length?'Next visit: '+svr(nextNum):'Create a project to start your first visit.';
- $('#resumeBtn').style.display=pending?'block':'none';$('#resumeBtn').textContent=pending?'Resume '+svr(pending.num)+' ('+await countFor(pending.id)+' photos)':'';
- $('#startBtn').style.display=pending?'none':'block';$('#startBtn').textContent='Start new visit';
- $('#sNum').textContent=pending?svr(pending.num)+' in progress':'Next '+svr(nextNum);
- const past=pv.filter(v=>v.closed).sort((a,b)=>b.id-a.id);$('#pastWrap').style.display=past.length?'block':'none';$('#pastList').replaceChildren();
- for(const v of past){const b=document.createElement('button');b.className='prow';const a=document.createElement('span');a.className='pn';a.textContent=svr(v.num);const d=document.createElement('span');d.className='pd';d.textContent=(v.localPhotosRemovedAt?'Photos removed · ':'')+new Date(v.date).toLocaleDateString()+' · '+(v.items||[]).filter(i=>i.status!=='Closed').length+' open items';b.append(a,d);b.onclick=safe(()=>openPast(v));$('#pastList').append(b);}
-}
-on('#addProject',async()=>{const name=prompt('Project name');if(!name?.trim())return;const number=prompt('Project number (optional)');if(number===null)return;
- const key=number.trim()?'number:'+number.trim().toLowerCase():'name:'+name.trim().toLowerCase();
- const exists=projects.find(p=>p.key===key);if(exists){selectedProject=exists.id;await loadState();return;}
- selectedProject=await put('projects',{name:name.trim(),number:number.trim(),key});await loadState();});
-on('#editProject',async()=>{const p=currentProject();if(!p)return;const name=prompt('Project name',p.name);if(!name?.trim())return;const number=prompt('Project number',p.number);if(number===null)return;const key=number.trim()?'number:'+number.trim().toLowerCase():'name:'+name.trim().toLowerCase();if(projects.some(x=>x.id!==p.id&&x.key===key))throw new Error('That project already exists.');await put('projects',{...p,name:name.trim(),number:number.trim(),key});await loadState();});
-$('#projectSelect').onchange=safe(async()=>{selectedProject=Number($('#projectSelect').value);await loadState();});
-async function newVisit(){const p=currentProject();if(!p)return $('#addProject').click();
- const pv=(await allV()).filter(v=>v.projectId===p.id).sort((a,b)=>a.id-b.id);
- if(pv.some(v=>!v.closed))throw new Error('Resume and complete the existing visit before starting another for this project.');
- const prev=pv.at(-1),v={schema:9,projectId:p.id,num:Math.max(0,...pv.map(v=>v.num))+1,date:Date.now(),started:Date.now(),project:p.name,projNum:p.number,attendees:'',preparedBy:prev?.preparedBy||stored('preparedBy',''),weather:'',temp:'',closed:false,exported:false,itemSeq:0,items:(prev?.items||[]).filter(i=>i.status!=='Closed').map(i=>({...clone(i),status:'Not reviewed',update:''}))};
- v.id=await putV(v);await enterCapture(v);if(v.items.length)await openItems(true);
-}
-on('#startBtn',async()=>{if(busy)return;$('#startBtn').disabled=true;try{await newVisit();}finally{$('#startBtn').disabled=false;}});
-on('#resumeBtn',()=>enterCapture(pending));
-function saveAreas(){if(visit)remember('areas:'+visit.projectId,{area,recent});}
-async function enterCapture(v){visit=clone(v);reviewing=false;const a=stored('areas:'+v.projectId,{area:'',recent:[]});area=a.area;recent=a.recent;lastId=null;$('#undo').classList.remove('show');$('#start').classList.add('hide');await refreshCount();paintProj();paintArea();fetchWeather(v.id);startCam();}
-async function openPast(v){visit=clone(v);reviewing=true;$('#start').classList.add('hide');paintProj();await openGal();}
-function stopCamera(){cameraRequest++;if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;track=null;}
-async function backToStart(){await captureTask;stopCamera();visit=null;reviewing=false;readyBlob=null;lastId=null;
- document.querySelectorAll('.sheet,.areasheet,.scrim').forEach(e=>e.classList.remove('open'));$('#busyWrap').classList.remove('show');$('#undo').classList.remove('show');releaseUrls();await loadState();$('#start').classList.remove('hide');}
-function paintProj(){if(visit)$('#projBtn').textContent=svr(visit.num);}
-on('#pauseBtn',e=>{e.stopPropagation();return backToStart();});on('#finishBtn',e=>{e.stopPropagation();return openGal();});
-function fetchWeather(vid){const epoch=dataEpoch;if(!navigator.geolocation||visit.weather)return;navigator.geolocation.getCurrentPosition(async pos=>{try{
- const url='https://api.open-meteo.com/v1/forecast?latitude='+pos.coords.latitude+'&longitude='+pos.coords.longitude+'&current=temperature_2m,weather_code&temperature_unit=fahrenheit';
- const response=await fetch(url,{signal:AbortSignal.timeout(10000)});if(!response.ok)return;const j=await response.json();if(epoch!==dataEpoch)return;
- // Fetch only updates the original visit, and never a completed or manually edited record.
- await transaction(['visits'],'readwrite',tx=>{const s=tx.objectStore('visits'),q=s.get(vid);q.onsuccess=()=>{const v=q.result;if(!v||v.closed||v.weather)return;v.weather=wmo(j.current.weather_code);v.temp=Math.round(j.current.temperature_2m)+' F';s.put(v);if(visit?.id===vid){visit.weather=v.weather;visit.temp=v.temp;}};});
- }catch{}},()=>{},{timeout:8000,maximumAge:900000});}
-function wmo(c){return ({0:'Clear',1:'Mainly clear',2:'Partly cloudy',3:'Overcast',45:'Fog',48:'Fog',51:'Light drizzle',53:'Drizzle',55:'Heavy drizzle',61:'Light rain',63:'Rain',65:'Heavy rain',71:'Light snow',73:'Snow',75:'Heavy snow',80:'Rain showers',81:'Rain showers',82:'Heavy showers',95:'Thunderstorm',96:'Thunderstorm',99:'Thunderstorm'})[c]||'Weather code '+c;}
-/* ---------- camera ---------- */
-let cameraRequest = 0;
-async function startCam(){
-  if($('#cloudSheet').classList.contains('open'))return;
-  const request = ++cameraRequest;
-  try{
-    if(stream) stream.getTracks().forEach(t=>t.stop());
-    const acquired = await navigator.mediaDevices.getUserMedia({
-      video:{ facingMode:{ideal:"environment"}, width:{ideal:3840}, height:{ideal:2160} }, audio:false });
-    if(request !== cameraRequest || !visit || reviewing || !$("#start").classList.contains("hide")){ acquired.getTracks().forEach(t=>t.stop()); return; }
-    stream = acquired; track = stream.getVideoTracks()[0];
-    const v = $("#cam");
-    v.srcObject = stream;
-    await v.play().catch(()=>{});
-    const caps = track.getCapabilities ? track.getCapabilities() : {};
-    nativeZoom = (caps.zoom && caps.zoom.max > caps.zoom.min) ? caps.zoom : null;
-    maxZoom = nativeZoom ? Math.min(caps.zoom.max, 8) : 5;
-    zoom = 1; buildZoomRow(); applyZoom();
-    $("#stall").classList.remove("show");
-  }catch(err){
-    $("#stall").textContent = "Camera blocked. Tap to try again.";
-    $("#stall").classList.add("show");
+(() => {
+  'use strict';
+
+  const root = document.getElementById('app');
+  const config = window.MEALZ_CONFIG || window.WEEKNIGHT_CONFIG || {};
+  const sharedMode = Boolean(config.supabaseUrl && config.supabasePublishableKey && window.supabase);
+  const sb = sharedMode
+    ? window.supabase.createClient(config.supabaseUrl, config.supabasePublishableKey, {
+        auth: {
+          persistSession: true,
+          autoRefreshToken: true,
+          detectSessionInUrl: true,
+          storageKey: 'mealz-shared-household-auth'
+        }
+      })
+    : null;
+
+  const state = {
+    view: 'week',
+    weekStart: startOfWeek(new Date()),
+    recipes: [],
+    meals: [],
+    groceries: [],
+    user: null,
+    modal: null,
+    recipeSearch: '',
+    planSearch: '',
+    modalStack: [],
+    filters: {
+      recipes: { types: [], time: 'any', favoritesOnly: false },
+      plan: { types: [], time: 'any', favoritesOnly: false }
+    },
+    hideChecked: false,
+    cook: null,
+    authMessage: '',
+    authError: '',
+    loading: true
+  };
+
+  let store;
+  let realtimeChannel = null;
+  let reloadTimer = null;
+
+  function uid() {
+    if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
+    return `id-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   }
-}
-setInterval(() => {
-  if(document.hidden) return;
-  if(!visit || reviewing || !$("#start").classList.contains("hide")) return;
-  if(document.querySelector(".sheet.open")) return;
-  const v = $("#cam");
-  const dead = !stream || !track || track.readyState !== "live" || v.paused || v.readyState < 2;
-  if(dead){ v.play().catch(()=>{}); $("#stall").textContent = "Camera stalled. Tap to restart."; $("#stall").classList.add("show"); }
-  else $("#stall").classList.remove("show");
-}, 1500);
-$("#stall").onclick = e => { e.stopPropagation(); startCam(); };
-document.addEventListener("visibilitychange", () => {
-  if(document.hidden || !visit || reviewing) return;
-  $("#cam").play().catch(()=>{});
-  if(!stream || !track || track.readyState !== "live") startCam();
-});
 
-/* ---------- zoom ---------- */
-function applyZoom(){
-  zoom = Math.max(1, Math.min(maxZoom, zoom));
-  if(nativeZoom && track){
-    const val = Math.max(nativeZoom.min, Math.min(nativeZoom.max, zoom));
-    track.applyConstraints({ advanced:[{ zoom: val }] }).catch(()=>{});
-    $("#cam").style.transform = "scale(1)";
-  } else {
-    $("#cam").style.transform = "scale(" + zoom + ")";
+  function cleanRecipePayload(recipe = {}) {
+    return {
+      name: String(recipe.name || '').trim(),
+      cuisine: String(recipe.cuisine || '').trim(),
+      prep_minutes: Number(recipe.prep_minutes || 0),
+      cook_minutes: Number(recipe.cook_minutes || 0),
+      difficulty: String(recipe.difficulty || 'Easy'),
+      favorite: Boolean(recipe.favorite),
+      rating: String(recipe.rating || ''),
+      is_new: Boolean(recipe.is_new),
+      tags: Array.isArray(recipe.tags) ? recipe.tags.filter(Boolean).map(String) : [],
+      ingredients: Array.isArray(recipe.ingredients) ? recipe.ingredients : [],
+      steps: Array.isArray(recipe.steps) ? recipe.steps : [],
+      source_url: String(recipe.source_url || '').trim()
+    };
   }
-  document.querySelectorAll(".zchip").forEach(c =>
-    c.classList.toggle("on", Math.abs(parseFloat(c.dataset.z) - zoom) < 0.06));
-}
-function buildZoomRow(){
-  const row = $("#zoomRow"); row.innerHTML = "";
-  [1,2,3].filter(z => z <= maxZoom).forEach(z => {
-    const b = document.createElement("button");
-    b.className = "zchip"; b.dataset.z = z; b.textContent = z + "x";
-    b.onclick = e => { e.stopPropagation(); zoom = z; applyZoom(); };
-    row.appendChild(b);
-  });
-}
-let pinchStart = 0, zoomStart = 1;
-const wrap = $("#camwrap");
-const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
-wrap.addEventListener("touchstart", e => { if(e.touches.length===2){ pinchStart=dist(e.touches); zoomStart=zoom; } }, {passive:true});
-wrap.addEventListener("touchmove",  e => { if(e.touches.length===2 && pinchStart){ zoom = zoomStart*(dist(e.touches)/pinchStart); applyZoom(); } }, {passive:true});
-wrap.addEventListener("touchend",   () => { pinchStart = 0; }, {passive:true});
 
-/* ---------- capture ---------- */
-const canvas = document.createElement("canvas");
-const ctx = canvas.getContext("2d");
-// Preserve the available camera-frame resolution; do not upscale.
-const PHOTO_QUALITY = 0.92;
-function shoot(){
-  const v = $("#cam");
-  if(busy || !v.videoWidth || !visit || reviewing || visit.closed) return;
-  if($("#areaSheet").classList.contains("open")) return;
-  const vid = visit.id, shotArea = area, ts = Date.now();
-  busy = true;
-  $("#shutter").classList.add("busy");
-  $("#flash").classList.add("on");
-  requestAnimationFrame(()=>$("#flash").classList.remove("on"));
-  captureTask = (async()=>{
-    try {
-      const crop = nativeZoom ? 1 : zoom;
-      const sw = v.videoWidth / crop, sh = v.videoHeight / crop;
-      canvas.width = Math.max(1, Math.round(sw)); canvas.height = Math.max(1, Math.round(sh));
-      ctx.drawImage(v, (v.videoWidth-sw)/2, (v.videoHeight-sh)/2, sw, sh, 0, 0, canvas.width, canvas.height);
-      const blob = await new Promise(resolve=>canvas.toBlob(resolve,"image/jpeg",PHOTO_QUALITY));
-      if(!blob || !blob.size) throw new Error("The camera did not return a photo. Please take it again.");
-      lastId = await savePhoto(vid, ts, blob, shotArea);
-      if(visit && visit.id===vid){ await refreshCount(); showUndo(); }
-    } catch(e){ showError(e); }
-    finally { busy=false; $("#shutter").classList.remove("busy"); }
-  })();
-}
-wrap.addEventListener("click", e => { if(e.target.id === "cam" || e.target.id === "camwrap") shoot(); });
-$("#shutter").addEventListener("click", e => { e.stopPropagation(); shoot(); });
+  function pushModal(next) {
+    if (state.modal) state.modalStack.push(state.modal);
+    state.modal = next;
+  }
 
-function showUndo(){
-  const u = $("#undo"); u.classList.add("show");
-  clearTimeout(undoTimer);
-  undoTimer = setTimeout(()=>u.classList.remove("show"), 6000);
-}
-$("#undo").onclick = safe(async e => {
-  e.stopPropagation();
-  if(lastId == null) return;
-  await deletePhoto(lastId); lastId = null;
-  await refreshCount();
-  $("#undo").classList.remove("show");
-});
-async function refreshCount(){
-  const recs = await visitPhotos();
-  count = recs.length; paintCount();
-  if(recs.length) setThumb(recs[recs.length-1].blob);
-  else { $("#thumb").style.backgroundImage=""; $("#thumb").classList.add("empty"); }
-}
-let thumbUrl = null;
-function setThumb(blob){
-  if(thumbUrl) URL.revokeObjectURL(thumbUrl);
-  thumbUrl = URL.createObjectURL(blob);
-  const t = $("#thumb");
-  t.style.backgroundImage = "url(" + thumbUrl + ")";
-  t.classList.remove("empty");
-}
-function paintCount(){
-  const t = $("#thumb");
-  let b = t.querySelector(".badge");
-  if(!b){ b = document.createElement("span"); b.className="badge"; t.appendChild(b); }
-  b.textContent = count; b.style.display = count ? "grid" : "none";
-}
+  function popModal() {
+    state.modal = state.modalStack.pop() || null;
+  }
 
-/* ---------- area ---------- */
-function openArea(){
-  $("#areaInput").value = area; drawRecent();
-  $("#areaSheet").classList.add("open"); $("#scrim").classList.add("open");
-  setTimeout(()=>$("#areaInput").focus(), 260);
-}
-function closeArea(save){
-  if(save){
-    area = $("#areaInput").value.trim();
-    saveAreas();
-    if(area && recent.indexOf(area) === -1){
-      recent.unshift(area); recent = recent.slice(0,8);
-      saveAreas();
+  function resetModals(next = null) {
+    state.modalStack = [];
+    state.modal = next;
+  }
+
+  function filterFor(context) {
+    return state.filters[context] || state.filters.recipes;
+  }
+
+  function filterCount(context) {
+    const f = filterFor(context);
+    return f.types.length + (f.time !== 'any' ? 1 : 0);
+  }
+
+  const TIME_OPTIONS = [
+    ['any', 'Any length'],
+    ['20', 'Under 20 minutes'],
+    ['30', 'Under 30 minutes'],
+    ['45', 'Under 45 minutes'],
+    ['46', '45 minutes or more']
+  ];
+
+  function passesFilter(recipe, context) {
+    const f = filterFor(context);
+    if (f.types.length && !f.types.includes(dishTypeOf(recipe))) return false;
+    if (f.favoritesOnly && !recipe.favorite) return false;
+    if (f.time !== 'any') {
+      const total = Number(recipe.prep_minutes || 0) + Number(recipe.cook_minutes || 0);
+      if (f.time === '46') { if (total < 45) return false; }
+      else if (total >= Number(f.time)) return false;
     }
-    paintArea();
+    return true;
   }
-  $("#areaInput").blur();
-  $("#areaSheet").classList.remove("open"); $("#scrim").classList.remove("open");
-  $("#cam").play().catch(()=>{});
-}
-function drawRecent(){
-  const r = $("#areaRecent"); r.innerHTML = "";
-  recent.forEach(a => {
-    const b = document.createElement("button");
-    b.className = "tag" + (a === area ? " on" : "");
-    b.textContent = a;
-    b.onclick = () => { $("#areaInput").value = a; closeArea(true); };
-    r.appendChild(b);
-  });
-}
-function paintArea(){ $("#areaBtn").textContent = area || "Set area"; }
-$("#areaBtn").onclick = e => { e.stopPropagation(); openArea(); };
-$("#areaDone").onclick = () => closeArea(true);
-$("#scrim").onclick = () => closeArea(true);
-$("#areaInput").addEventListener("keydown", e => { if(e.key === "Enter") closeArea(true); });
 
-/* Visit details and photo review */
-on('#projBtn',e=>{e.stopPropagation();openVisitInfo();});
-function openVisitInfo(){if(!visit)return;
- for(const [id,key] of [['vProject','project'],['vNum','projNum'],['vAtt','attendees'],['vBy','preparedBy'],['vWx','weather'],['vTemp','temp']]){$('#'+id).value=visit[key]||'';$('#'+id).disabled=!!visit.closed||id==='vProject'||id==='vNum';}
- $('#vDate').value=dateInput(visit.date);$('#vDate').disabled=!!visit.closed;
- $('#vAuto').textContent=svr(visit.num)+(visit.closed?' · Complete. Report history is read only.':' · Photo times are recorded automatically.');$('#visSave').hidden=!!visit.closed;$('#vis').classList.add('open');}
-on('#visClose',()=>$('#vis').classList.remove('open'));
-on('#visSave',async()=>{editable();if(!$('#vDate').value)throw new Error('Enter the visit date.');const next=clone(visit);next.date=new Date($('#vDate').value+'T12:00:00').getTime();for(const [id,key] of [['vAtt','attendees'],['vBy','preparedBy'],['vWx','weather'],['vTemp','temp']])next[key]=$('#'+id).value.trim();await persistVisit(next);remember('preparedBy',visit.preparedBy);$('#vis').classList.remove('open');});
-on('#vPause',backToStart);
-function releaseUrls(){urls.forEach(URL.revokeObjectURL);urls=[];itemUrls.forEach(URL.revokeObjectURL);itemUrls=[];if(detailUrl){URL.revokeObjectURL(detailUrl);detailUrl=null;}if(thumbUrl){URL.revokeObjectURL(thumbUrl);thumbUrl=null;}}
-async function openGal(){await captureTask;const recs=await visitPhotos();urls.forEach(URL.revokeObjectURL);urls=[];$('#grid').replaceChildren();
- $('#galEmpty').style.display=recs.length?'none':'block';$('#galEmpty').textContent='No photos yet. You can still record items and export a report.';
- $('#galTitle').textContent=svr(visit.num)+' · '+recs.length+' photos';$('#galClose').textContent=reviewing?'Start':'Camera';
- for(const id of ['#galBack','#galPause','#galEnd'])$(id).style.display=reviewing?'none':'block';$('#galToStart').style.display=reviewing?'block':'none';
- $('#galBuild').disabled=false;$('#galExport').disabled=false;$('#galItems').textContent=(visit.closed?'View items':'Review items')+' ('+visit.items.filter(i=>i.status!=='Closed').length+' open)';
- recs.forEach((r,i)=>{if(!r.blob?.size){const row=document.createElement('p');row.className='auto';row.textContent='Observation '+String(i+1).padStart(3,'0')+' · Photo removed from phone. Open the saved cloud photo or restore the project recovery file.';$('#grid').append(row);return;}const u=URL.createObjectURL(r.blob);urls.push(u);const c=document.createElement('button');c.className='cell'+(r.note||r.tag?' noted':'');c.style.backgroundImage='url('+u+')';c.setAttribute('aria-label','Observation '+(i+1));const n=document.createElement('span');n.className='n';n.textContent=String(i+1).padStart(3,'0');const t=document.createElement('span');t.className='t';t.textContent=fmt(r.ts);c.append(n,t);c.onclick=safe(()=>openDet(r.id,i+1));$('#grid').append(c);});$('#gal').classList.add('open');}
-on('#thumb',e=>{e.stopPropagation();return openGal();});
-on('#galClose',()=>reviewing?backToStart():$('#gal').classList.remove('open'));
-on('#galBack',()=>$('#gal').classList.remove('open'));on('#galPause',backToStart);on('#galToStart',backToStart);on('#galInfo',openVisitInfo);on('#galItems',()=>openItems(false));
-async function completeVisit(){editable();await captureTask;
- if(!confirm('Complete '+svr(visit.num)+'? Its photos, notes and item statuses will become read only. You can export it again at any time.'))return;
- const next=clone(visit);next.closed=true;next.completedAt=Date.now();await persistVisit(next);await backToStart();}
-on('#galEnd',completeVisit);on('#doneComplete',completeVisit);
-async function openDet(id,n){const pr=await oneP(id);cur=joinMeta(pr,await oneM(id));if(detailUrl)URL.revokeObjectURL(detailUrl);detailUrl=URL.createObjectURL(cur.blob);$('#detImg').src=detailUrl;
- $('#detTitle').textContent='Observation '+String(n).padStart(3,'0');$('#detMeta').textContent=new Date(cur.ts).toLocaleString();
- for(const [id,key] of [['detNote','note'],['detArea','area'],['detSheet','sheet'],['detOwner','owner']]){$('#'+id).value=cur[key]||'';$('#'+id).disabled=!!visit.closed;}
- const item=visit.items.find(i=>i.id===cur.itemId||i.photoId===cur.id);cur.itemId=item?.id||'';if(item?.photoId===cur.id){cur.note=item.note;cur.owner=item.owner;cur.due=item.due;cur.area=item.area;$('#detNote').value=cur.note;$('#detOwner').value=cur.owner;$('#detArea').value=cur.area;}cur.original=JSON.stringify([cur.note,cur.area,cur.sheet,cur.owner,cur.tag,cur.due,cur.itemId]);
- $('#detDue').value=/^\d{4}-\d{2}-\d{2}$/.test(cur.due)?cur.due:'';$('#detDue').disabled=!!visit.closed;
- drawTags(cur.tag);drawDue(cur.due);$('#detSave').hidden=!!visit.closed;$('#detDel').hidden=!!visit.closed;$('#det').classList.add('open');}
-function drawTags(active){$('#tagRow').replaceChildren();TAGS.forEach(t=>{const b=document.createElement('button');b.className='tag'+(t===active?' on':'');b.textContent=t;b.disabled=!!visit.closed;b.onclick=()=>{cur.tag=cur.tag===t?'':t;drawTags(cur.tag);};$('#tagRow').append(b);});$('#actionBits').style.display=(['Issue','Action','Safety'].includes(active))?'block':'none';}
-function drawDue(active){$('#dueRow').replaceChildren();['Next visit','One week','Two weeks','Clear'].forEach(d=>{const b=document.createElement('button');b.className='tag'+((d==='Clear'?!active:dueValue(d,visit.date)===active)?' on':'');b.textContent=d;b.disabled=!!visit.closed;b.onclick=()=>{cur.due=d==='Clear'?'':dueValue(d,visit.date);$('#detDue').value=/^\d{4}-\d{2}-\d{2}$/.test(cur.due)?cur.due:'';drawDue(cur.due);};$('#dueRow').append(b);});}
-$('#detDue').onchange=()=>{cur.due=$('#detDue').value;drawDue(cur.due);};
-on('#detClose',()=>{const current=JSON.stringify([$('#detNote').value,$('#detArea').value,$('#detSheet').value,$('#detOwner').value,cur.tag,cur.due,cur.itemId||'']);if(!visit.closed&&current!==cur.original&&!confirm('Leave without saving these changes?'))return;$('#det').classList.remove('open');});
-on('#detSave',async()=>{editable();const next=clone(visit),m={id:cur.id,note:$('#detNote').value.trim(),tag:cur.tag||'',area:$('#detArea').value.trim(),sheet:$('#detSheet').value.trim(),owner:$('#detOwner').value.trim(),due:cur.due||'',itemId:cur.itemId||''};
- const origin=next.items.find(i=>i.photoId===cur.id);
- if(origin&&!['Issue','Action','Safety'].includes(m.tag))throw new Error('This photo has a tracked item. Keep its Issue, Action or Safety tag and close the item from Review items when resolved.');
- next.items.forEach(i=>i.followupPhotoIds=(i.followupPhotoIds||[]).filter(id=>id!==cur.id));
- let item=origin||next.items.find(i=>i.id===m.itemId);
- if(!item&&['Issue','Action','Safety'].includes(m.tag)){item=newItem(next,{photoId:cur.id,firstNoted:cur.ts});next.items.push(item);}
- if(item){m.itemId=item.id;if(item.photoId===cur.id){Object.assign(item,{note:m.note,owner:m.owner,due:m.due,area:m.area,tag:m.tag});}else if(!item.followupPhotoIds.includes(cur.id))item.followupPhotoIds.push(cur.id);}
- await transaction(['meta','visits'],'readwrite',tx=>{tx.objectStore('meta').put(m);tx.objectStore('visits').put(next);});visit=next;readyBlob=null;
- if(m.area){area=m.area;recent=[area,...recent.filter(a=>a!==area)].slice(0,8);saveAreas();paintArea();}$('#det').classList.remove('open');await openGal();});
-on('#detDel',async()=>{if(!confirm('Delete this photo? This cannot be undone.'))return;await deletePhoto(cur.id);await refreshCount();$('#det').classList.remove('open');await openGal();});
-/* Items are copied into each visit. Completed visits never read later statuses. */
-async function openItems(fromStart){await captureTask;itemsFromStart=fromStart;await paintItems();$('#itemsSheet').classList.add('open');}
-async function paintItems(){itemUrls.forEach(URL.revokeObjectURL);itemUrls=[];$('#itemsTitle').textContent=svr(visit.num)+' items';$('#itemsList').replaceChildren();$('#addItem').hidden=!!visit.closed;$('#itemsContinue').textContent=itemsFromStart?'Continue to camera':'Back to report';
- if(!visit.items.length){const p=document.createElement('p');p.textContent='No tracked items yet. Tag a photo Issue, Action or Safety, or add an item below.';$('#itemsList').append(p);}
- for(const item of [...visit.items].sort((a,b)=>Number(b.tag==='Safety')-Number(a.tag==='Safety'))){const card=document.createElement('article');card.className='itemcard'+(item.tag==='Safety'?' safety':'');const title=document.createElement('h3');title.textContent=(item.tag==='Safety'?'SAFETY · ':'')+item.ref+' · '+item.status;card.append(title);
- if(item.photoId){const pr=await oneP(item.photoId);if(pr?.blob){const im=document.createElement('img');im.alt='Original photo for item '+item.ref;im.src=URL.createObjectURL(pr.blob);itemUrls.push(im.src);card.append(im);}}
- for(const txt of [item.note||'Photo item with no description',item.area,[item.owner?'Owner: '+item.owner:'',item.due?'Due: '+item.due:''].filter(Boolean).join(' · '),'First noted '+svr(item.firstVisitNum)+' · '+new Date(item.firstNoted).toLocaleDateString(),item.update?'This visit: '+item.update:''])if(txt){const p=document.createElement('p');p.textContent=txt;card.append(p);}
- const chips=document.createElement('div');chips.className='chips';if(!visit.closed){for(const status of ['Still open','Closed']){const b=document.createElement('button');b.className='tag'+(item.status===status?' on':'');b.textContent=status;b.onclick=safe(async()=>{const next=clone(visit),it=next.items.find(i=>i.id===item.id);it.status=status;it.closedAt=status==='Closed'?Date.now():null;await persistVisit(next);await paintItems();});chips.append(b);}const edit=document.createElement('button');edit.className='btn';edit.textContent='Details / update';edit.onclick=()=>openItemEditor(item.id);chips.append(edit);}card.append(chips);$('#itemsList').append(card);}
-}
-async function closeItems(){ $('#itemsSheet').classList.remove('open');if(!itemsFromStart)await openGal();}
-on('#itemsClose',closeItems);on('#itemsContinue',closeItems);
-function openItemEditor(id){editingItem=id;const i=visit.items.find(i=>i.id===id)||{};for(const [field,key] of [['itemNote','note'],['itemOwner','owner'],['itemDue','due'],['itemArea','area'],['itemUpdate','update']])$('#'+field).value=i[key]||'';$('#itemEditor').classList.add('open');}
-on('#addItem',()=>openItemEditor(null));on('#itemCancel',()=>$('#itemEditor').classList.remove('open'));
-on('#itemSave',async()=>{editable();const note=$('#itemNote').value.trim();if(!note)throw new Error('Enter a short description for this item.');const next=clone(visit);let item=next.items.find(i=>i.id===editingItem);if(!item){item=newItem(next);next.items.push(item);}Object.assign(item,{note,owner:$('#itemOwner').value.trim(),due:$('#itemDue').value,area:$('#itemArea').value.trim(),update:$('#itemUpdate').value.trim()});await persistVisit(next);$('#itemEditor').classList.remove('open');await paintItems();});
-/* Exporting leaves the visit open. Completion is a separate, explicit action. */
-function busyFail(msg){$('#busyText').textContent=msg;$('#busyClose').style.display='block';}
-on('#busyClose',()=>$('#busyWrap').classList.remove('show'));
-async function buildReport(){await captureTask;
- const unreviewed=visit.items.filter(i=>i.status==='Not reviewed').length;
- if(!visit.closed&&unreviewed&&!confirm(unreviewed+' item(s) have not been reviewed. Export with that status shown? Choose Cancel to review them.')){await openItems(false);return;}
- $('#busyText').textContent='Building report';$('#busyClose').style.display='none';$('#busyWrap').classList.add('show');
- try{const recs=await visitPhotos();if(recs.some(r=>!r.blob?.size))throw new Error('Some photos are no longer on this phone. Use the report saved in your cloud or restore the project recovery file first.');
- const snapshot=clone(visit);readyBlob=await window.SVReport.buildReport(snapshot,recs);readyName=window.SVReport.reportFileName(snapshot);
- $('#doneName').textContent=readyName;$('#doneNote').textContent='Save or share the file. Complete the visit when you are finished editing.';$('#doneComplete').hidden=!!visit.closed;$('#done').classList.add('open');$('#busyWrap').classList.remove('show');
- }catch(e){busyFail('Could not build the report. '+e.message);}}
-on('#galBuild',buildReport);on('#galExport',buildReport);
-function download(blob,name){const a=document.createElement('a');const url=URL.createObjectURL(blob);a.href=url;a.download=name;document.body.append(a);a.click();setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},30000);}
-on('#doneSave',()=>{if(readyBlob){download(readyBlob,readyName);$('#doneNote').textContent='Download requested. Confirm the file is saved before completing the visit.';}});
-on('#doneShare',async()=>{if(!readyBlob)return;const file=new File([readyBlob],readyName,{type:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'});
- try{if(navigator.canShare?.({files:[file]})){await navigator.share({files:[file],title:readyName});$('#doneNote').textContent='File shared. Complete the visit when you are finished.';}else{download(readyBlob,readyName);$('#doneNote').textContent='Download requested. Confirm the file is saved before completing the visit.';}}catch(e){if(e.name!=='AbortError')throw e;}});
-on('#doneClose',()=>$('#done').classList.remove('open'));on('#doneStart',backToStart);
-/* Portable backup. Restore validates first, then replaces all stores in one transaction. */
-function blobData(blob){return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(reader.error);reader.readAsDataURL(blob);});}
-async function exportBackup(){
- $('#backup').disabled=true;$('#backup').textContent='Preparing backup';
- try{const snapshot=await transaction(STORES,'readonly',tx=>{const qs=STORES.map(n=>tx.objectStore(n).getAll());return ()=>Object.fromEntries(STORES.map((n,i)=>[n,qs[i].result]));});
- for(const p of snapshot.photos){if(p.blob?.size){p.data=await blobData(p.blob);delete p.archived;}else if(p.archived===true){p.data=null;}else throw new Error('A saved photo is unreadable.');delete p.blob;}
- download(new Blob([JSON.stringify({format:'rdg-sitevisit-backup',version:2,createdAt:new Date().toISOString(),data:snapshot})],{type:'application/json'}),'RDG-Site-Visit-Backup-'+dateInput(Date.now())+'.json');
- alert('Backup download requested. Keep the saved JSON file somewhere you can find it. It contains all project records and photos still on this phone. Previously removed photos remain in your earlier cloud files.');
- }finally{$('#backup').disabled=false;$('#backup').textContent='Save all app data';}}
-function validateBackup(raw){
- if(raw?.format!=='rdg-sitevisit-backup'||![1,2].includes(raw.version)||!raw.data)throw new Error('This is not a supported Site Visit backup.');
- const d=raw.data,maps={};
- for(const n of STORES){if(!Array.isArray(d[n]))throw new Error('Backup is missing '+n+'.');maps[n]=new Map();for(const r of d[n]){if(!r||!Number.isSafeInteger(r.id)||r.id<1||maps[n].has(r.id))throw new Error('Invalid or duplicate record in '+n+'.');maps[n].set(r.id,r);}}
- const str=(v)=>typeof v==='string';const validDate=v=>Number.isFinite(v)&&v>0;
- const keys=new Set();for(const p of d.projects){if(!str(p.name)||!p.name.trim()||!str(p.number)||!str(p.key)||keys.has(p.key))throw new Error('Invalid or duplicate project.');keys.add(p.key);}
- const nums=new Set(),active=new Set();
- for(const v of d.visits){if(v.schema!==9||!maps.projects.has(v.projectId)||!Number.isInteger(v.num)||v.num<1||!validDate(v.date)||!Array.isArray(v.items)||!Number.isInteger(v.itemSeq)||v.itemSeq<0||typeof v.closed!=='boolean')throw new Error('Invalid visit in backup.');
- for(const k of ['project','projNum','attendees','preparedBy','weather','temp'])if(!str(v[k]))throw new Error('Invalid visit details.');
- const n=v.projectId+':'+v.num;if(nums.has(n))throw new Error('Duplicate visit number.');nums.add(n);
- if(!v.closed){if(active.has(v.projectId))throw new Error('More than one unfinished visit for a project.');active.add(v.projectId);}
- if(v.legacyReportItems!=null&&!Array.isArray(v.legacyReportItems))throw new Error('Invalid legacy report history.');
- for(const itemList of [v.items,...(v.legacyReportItems?[v.legacyReportItems]:[])]){const ids=new Set();for(const it of itemList){const origin=maps.visits.get(it.originVisitId);if(!str(it.id)||ids.has(it.id)||!str(it.ref)||!origin||origin.projectId!==v.projectId||!validDate(it.firstNoted)||!['New','Still open','Not reviewed','Closed'].includes(it.status))throw new Error('Invalid item history.');ids.add(it.id);
- for(const k of ['note','owner','due','area','update'])if(!str(it[k]))throw new Error('Invalid item details.');
- if(!Array.isArray(it.followupPhotoIds))throw new Error('Invalid item photos.');
- for(const id of [it.photoId,...it.followupPhotoIds].filter(id=>id!=null)){const photo=maps.photos.get(id);if(!photo||maps.visits.get(photo.visitId)?.projectId!==v.projectId)throw new Error('An item references a missing photo or another project.');}
- }}}
- for(const m of d.meta){if(!maps.photos.has(m.id))throw new Error('Photo notes reference a missing photo.');for(const k of NOTE_KEYS)if(m[k]!=null&&!str(m[k]))throw new Error('Invalid photo notes.');}
- for(const p of d.photos){if(raw.version===2&&p.archived===true&&p.data===null){if(!maps.visits.has(p.visitId)||!validDate(p.ts))throw new Error('Invalid archived photo.');delete p.blob;continue;}if(!maps.visits.has(p.visitId)||!validDate(p.ts)||!str(p.data)||!/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+=*$/.test(p.data))throw new Error('Invalid photo in backup.');const [header,encoded]=p.data.split(',');let bytes;try{bytes=Uint8Array.from(atob(encoded),c=>c.charCodeAt(0));}catch{throw new Error('A photo is damaged in the backup.');}if(!bytes.length)throw new Error('Backup contains an empty photo.');p.blob=new Blob([bytes],{type:header.slice(5,header.indexOf(';'))});delete p.data;delete p.archived;}
- return d;
-}
-let dataEpoch=0;
-on('#backup',exportBackup);on('#restore',()=>$('#restoreFile').click());
-$('#restoreFile').onchange=safe(async()=>{const file=$('#restoreFile').files[0];$('#restoreFile').value='';if(!file)return;
- const d=validateBackup(JSON.parse(await file.text()));
- if(!confirm('Restore '+d.projects.length+' projects, '+d.visits.length+' visits and '+d.photos.length+' photos? This replaces all data currently in this app. Cancel and back up first if you need to keep the current data.'))return;
- for(const p of d.photos){if(p.blob&&!await measure(p.blob))throw new Error('A photo in the backup cannot be opened. No saved data was changed.');}
- dataEpoch++;await transaction(STORES,'readwrite',tx=>{for(const n of STORES){const s=tx.objectStore(n);s.clear();d[n].forEach(r=>s.put(r));}});
- selectedProject=null;await loadState();alert('Backup restored.');});
-let registration=null;
-on('#checkUpdate',async()=>{if(!registration){$('#updateNote').textContent='Updates are available when the app is hosted online.';return;}await registration.update();if(registration.waiting){if(confirm('Install the available update and reload? Saved projects and photos will remain.'))registration.waiting.postMessage('ACTIVATE');}else $('#updateNote').textContent='Update check requested. If a new version is found, it will appear here shortly.';});
-async function setupUpdates(){if(!('serviceWorker'in navigator))return;
- registration=await navigator.serviceWorker.register('sw.js',{updateViaCache:'none'});
- function ready(){if(registration.waiting)$('#updateNote').textContent='An update is ready. Tap Check for update to install.';}
- ready();registration.addEventListener('updatefound',()=>registration.installing?.addEventListener('statechange',ready));
- navigator.serviceWorker.addEventListener('controllerchange',()=>{if(!visit)location.reload();else $('#updateNote').textContent='Update installed. Return to Start and reopen the app to load it.';});
-}
-wireCloudUI();
-async function init(){try{db=await openDB();await migrate();await loadState();paintArea();setupUpdates().catch(()=>{});}catch(e){$('#sState').textContent='Could not open saved projects. '+e.message;showError(e);}}
-// One editor tab prevents competing visit numbers and conflicting photo or item edits.
-if(navigator.locks){navigator.locks.request('rdg-sitevisit-editor',{ifAvailable:true},async lock=>{if(!lock){$('#sState').textContent='Site Visit is already open in another tab or window. Close that window, then reload this one.';document.querySelectorAll('button').forEach(b=>b.disabled=true);return;}await init();await new Promise(()=>{});});}else init();
+  function cleanMealPayload(meal = {}) {
+    return {
+      meal_date: meal.meal_date,
+      type: meal.type,
+      recipe_id: meal.recipe_id || null,
+      label: String(meal.label || ''),
+      notes: String(meal.notes || '')
+    };
+  }
+
+  function escapeHtml(value = '') {
+    return String(value)
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#039;');
+  }
+
+  function parseLocalDate(key) {
+    const [y, m, d] = key.split('-').map(Number);
+    return new Date(y, m - 1, d, 12, 0, 0, 0);
+  }
+
+  function dateKey(date) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  function addDays(date, days) {
+    const copy = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 12, 0, 0, 0);
+    copy.setDate(copy.getDate() + days);
+    return copy;
+  }
+
+  function startOfWeek(date) {
+    const copy = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 12, 0, 0, 0);
+    const day = copy.getDay();
+    const offset = day === 0 ? -6 : 1 - day;
+    copy.setDate(copy.getDate() + offset);
+    return copy;
+  }
+
+  function sameDay(a, b) {
+    return dateKey(a) === dateKey(b);
+  }
+
+  function formatWeekRange(start) {
+    const end = addDays(start, 6);
+    const sameMonth = start.getMonth() === end.getMonth();
+    const monthA = start.toLocaleDateString(undefined, { month: 'short' });
+    const monthB = end.toLocaleDateString(undefined, { month: 'short' });
+    return sameMonth
+      ? `${monthA} ${start.getDate()}–${end.getDate()}, ${end.getFullYear()}`
+      : `${monthA} ${start.getDate()} – ${monthB} ${end.getDate()}, ${end.getFullYear()}`;
+  }
+
+  function weekKey() {
+    return dateKey(state.weekStart);
+  }
+
+  function sampleRecipes() {
+    return [
+      {
+        name: 'Chicken Fajita Bowls', cuisine: 'Mexican', prep_minutes: 12, cook_minutes: 20,
+        difficulty: 'Easy', favorite: true, rating: 'makeagain', is_new: false,
+        tags: ['lean protein', 'fresh vegetables', 'good leftovers', 'bowl'], source_url: '',
+        ingredients: [
+          { amount: '2 lb', name: 'chicken breast', category: 'Meat' },
+          { amount: '3', name: 'bell peppers', category: 'Produce' },
+          { amount: '1', name: 'red onion', category: 'Produce' },
+          { amount: '2', name: 'limes', category: 'Produce' },
+          { amount: '2', name: 'avocados', category: 'Produce' },
+          { amount: '2 cups', name: 'rice', category: 'Pantry' },
+          { amount: '1 packet', name: 'fajita seasoning', category: 'Pantry' }
+        ],
+        steps: [
+          'Start the rice.',
+          'Slice the chicken, peppers, and onion.',
+          'Season the chicken and cook it in a large skillet until browned and cooked through.',
+          'Add the peppers and onion and cook until crisp-tender.',
+          'Build bowls with rice, chicken and vegetables, avocado, and lime.'
+        ]
+      },
+      {
+        name: 'Greek Chicken Pitas', cuisine: 'Greek', prep_minutes: 15, cook_minutes: 15,
+        difficulty: 'Easy', favorite: true, rating: 'makeagain', is_new: false,
+        tags: ['lean protein', 'fresh vegetables', 'quick'], source_url: '',
+        ingredients: [
+          { amount: '2 lb', name: 'chicken breast', category: 'Meat' },
+          { amount: '1', name: 'cucumber', category: 'Produce' },
+          { amount: '1 pint', name: 'cherry tomatoes', category: 'Produce' },
+          { amount: '1', name: 'lemon', category: 'Produce' },
+          { amount: '8', name: 'pitas', category: 'Bakery' },
+          { amount: '1 cup', name: 'Greek yogurt', category: 'Dairy' },
+          { amount: '4 oz', name: 'feta', category: 'Dairy' }
+        ],
+        steps: [
+          'Season the chicken with olive oil, lemon, oregano, salt, and pepper.',
+          'Cook the chicken in a skillet or on the grill until cooked through.',
+          'Chop cucumber and tomatoes while the chicken cooks.',
+          'Mix Greek yogurt with lemon, salt, and a little garlic for a quick sauce.',
+          'Fill warm pitas with chicken, vegetables, sauce, and feta.'
+        ]
+      },
+      {
+        name: 'Peruvian Green Chicken Bowls', cuisine: 'Peruvian', prep_minutes: 18, cook_minutes: 22,
+        difficulty: 'Easy', favorite: true, rating: 'makeagain', is_new: false,
+        tags: ['lean protein', 'fresh vegetables', 'good leftovers', 'bowl'], source_url: '',
+        ingredients: [
+          { amount: '2 lb', name: 'chicken thighs', category: 'Meat' },
+          { amount: '1 bunch', name: 'cilantro', category: 'Produce' },
+          { amount: '2', name: 'limes', category: 'Produce' },
+          { amount: '1', name: 'jalapeño', category: 'Produce' },
+          { amount: '1', name: 'avocado', category: 'Produce' },
+          { amount: '2 cups', name: 'rice', category: 'Pantry' },
+          { amount: '1/2 cup', name: 'Greek yogurt', category: 'Dairy' }
+        ],
+        steps: [
+          'Start the rice.',
+          'Season the chicken with cumin, garlic, salt, pepper, and lime.',
+          'Cook chicken until browned and cooked through, then slice.',
+          'Blend cilantro, jalapeño, lime, and Greek yogurt into a quick green sauce.',
+          'Build bowls with rice, chicken, avocado, and green sauce.'
+        ]
+      },
+      {
+        name: 'Turkey Taco Skillet', cuisine: 'Mexican', prep_minutes: 10, cook_minutes: 18,
+        difficulty: 'Very Easy', favorite: false, rating: '', is_new: true,
+        tags: ['lean protein', 'one pan', 'quick', 'good leftovers'], source_url: '',
+        ingredients: [
+          { amount: '2 lb', name: 'lean ground turkey', category: 'Meat' },
+          { amount: '1', name: 'bell pepper', category: 'Produce' },
+          { amount: '1', name: 'onion', category: 'Produce' },
+          { amount: '1 can', name: 'black beans', category: 'Pantry' },
+          { amount: '1 cup', name: 'frozen corn', category: 'Frozen' },
+          { amount: '1 packet', name: 'taco seasoning', category: 'Pantry' },
+          { amount: '1 jar', name: 'salsa', category: 'Pantry' }
+        ],
+        steps: [
+          'Dice the pepper and onion.',
+          'Brown the turkey in a large skillet.',
+          'Add pepper, onion, and taco seasoning and cook until vegetables soften.',
+          'Stir in black beans, corn, and salsa and heat through.',
+          'Serve as bowls, in tortillas, or over greens.'
+        ]
+      },
+      {
+        name: 'Chicken Shawarma Bowls', cuisine: 'Mediterranean', prep_minutes: 15, cook_minutes: 20,
+        difficulty: 'Easy', favorite: false, rating: '', is_new: true,
+        tags: ['lean protein', 'fresh vegetables', 'bowl', 'good leftovers'], source_url: '',
+        ingredients: [
+          { amount: '2 lb', name: 'chicken breast', category: 'Meat' },
+          { amount: '1', name: 'cucumber', category: 'Produce' },
+          { amount: '1 pint', name: 'cherry tomatoes', category: 'Produce' },
+          { amount: '1', name: 'red onion', category: 'Produce' },
+          { amount: '2', name: 'lemons', category: 'Produce' },
+          { amount: '2 cups', name: 'rice', category: 'Pantry' },
+          { amount: '1 cup', name: 'Greek yogurt', category: 'Dairy' }
+        ],
+        steps: [
+          'Start the rice.',
+          'Season chicken with cumin, paprika, garlic, lemon, salt, and pepper.',
+          'Cook chicken in a skillet until browned and cooked through, then slice.',
+          'Chop cucumber, tomato, and onion and make a quick yogurt-lemon sauce.',
+          'Build bowls with rice, chicken, vegetables, and sauce.'
+        ]
+      },
+      {
+        name: 'Peruvian Beef & Veggie Stir-Fry', cuisine: 'Peruvian', prep_minutes: 15, cook_minutes: 15,
+        difficulty: 'Easy', favorite: false, rating: '', is_new: true,
+        tags: ['fresh vegetables', 'quick', 'one pan'], source_url: '',
+        ingredients: [
+          { amount: '1.5 lb', name: 'lean sirloin', category: 'Meat' },
+          { amount: '2', name: 'tomatoes', category: 'Produce' },
+          { amount: '1', name: 'red onion', category: 'Produce' },
+          { amount: '1 bunch', name: 'cilantro', category: 'Produce' },
+          { amount: '2', name: 'limes', category: 'Produce' },
+          { amount: '2 cups', name: 'rice', category: 'Pantry' },
+          { amount: '3 tbsp', name: 'soy sauce', category: 'Pantry' }
+        ],
+        steps: [
+          'Start the rice.',
+          'Slice beef, tomatoes, and onion into strips.',
+          'Sear beef quickly in a very hot skillet and remove.',
+          'Cook onion and tomato briefly, then return beef with soy sauce and lime.',
+          'Finish with cilantro and serve over rice.'
+        ]
+      }
+    ];
+  }
+
+  class LocalStore {
+    constructor() {
+      this.prefix = 'mealz-v2-';
+      this.legacyPrefix = 'weeknight-v1-';
+      ['recipes', 'meals', 'groceries'].forEach(name => {
+        if (localStorage.getItem(this.prefix + name) == null && localStorage.getItem(this.legacyPrefix + name) != null) {
+          localStorage.setItem(this.prefix + name, localStorage.getItem(this.legacyPrefix + name));
+        }
+      });
+    }
+    read(name, fallback = []) {
+      try { return JSON.parse(localStorage.getItem(this.prefix + name)) ?? fallback; }
+      catch { return fallback; }
+    }
+    write(name, value) {
+      localStorage.setItem(this.prefix + name, JSON.stringify(value));
+    }
+    async initialize() {
+      let recipes = this.read('recipes');
+      if (!recipes.length) {
+        recipes = sampleRecipes().map(r => ({ ...r, id: uid(), created_at: new Date().toISOString() }));
+        this.write('recipes', recipes);
+      }
+    }
+    async loadAll() {
+      return {
+        recipes: this.read('recipes'),
+        meals: this.read('meals'),
+        groceries: this.read('groceries')
+      };
+    }
+    async saveRecipe(recipe) {
+      const recipes = this.read('recipes');
+      const next = { ...recipe, id: recipe.id || uid(), created_at: recipe.created_at || new Date().toISOString() };
+      const index = recipes.findIndex(r => r.id === next.id);
+      if (index >= 0) recipes[index] = next; else recipes.push(next);
+      this.write('recipes', recipes);
+      return next;
+    }
+    async saveRecipes(items) {
+      const recipes = this.read('recipes');
+      const added = items.map(recipe => ({ ...cleanRecipePayload(recipe), id: uid(), created_at: new Date().toISOString() }));
+      recipes.push(...added);
+      this.write('recipes', recipes);
+      return added;
+    }
+    async deleteRecipe(recipeId) {
+      this.write('meals', this.read('meals').filter(m => m.recipe_id !== recipeId));
+      this.write('recipes', this.read('recipes').filter(r => r.id !== recipeId));
+    }
+    async upsertMeal(meal) {
+      const meals = this.read('meals');
+      const index = meals.findIndex(m => m.meal_date === meal.meal_date);
+      const next = { ...meal, id: index >= 0 ? meals[index].id : uid() };
+      if (index >= 0) meals[index] = next; else meals.push(next);
+      this.write('meals', meals);
+      return next;
+    }
+    async deleteMeal(mealDate) {
+      this.write('meals', this.read('meals').filter(m => m.meal_date !== mealDate));
+    }
+    async replaceAutoGroceries(start, generated) {
+      const all = this.read('groceries');
+      const kept = all.filter(g => !(g.week_start === start && !g.manual));
+      const added = generated.map(g => ({ ...g, id: uid() }));
+      this.write('groceries', [...kept, ...added]);
+    }
+    async saveGrocery(item) {
+      const all = this.read('groceries');
+      const next = { ...item, id: item.id || uid() };
+      const index = all.findIndex(g => g.id === next.id);
+      if (index >= 0) all[index] = next; else all.push(next);
+      this.write('groceries', all);
+      return next;
+    }
+    async deleteGrocery(id) {
+      this.write('groceries', this.read('groceries').filter(g => g.id !== id));
+    }
+    async clearChecked(start) {
+      this.write('groceries', this.read('groceries').filter(g => !(g.week_start === start && g.checked)));
+    }
+    async clearWeek(start) {
+      this.write('groceries', this.read('groceries').filter(g => g.week_start !== start));
+    }
+    async reset() {
+      ['recipes', 'meals', 'groceries'].forEach(k => localStorage.removeItem(this.prefix + k));
+      await this.initialize();
+    }
+  }
+
+  class SupabaseStore {
+    constructor(client, user) {
+      this.client = client;
+      this.user = user;
+    }
+    async initialize() {
+      const { data, error } = await this.client.from('recipes').select('id').limit(1);
+      if (error) throw error;
+      if (!data.length) {
+        const rows = sampleRecipes().map(r => ({ ...r, user_id: this.user.id }));
+        const { error: insertError } = await this.client.from('recipes').insert(rows);
+        if (insertError) throw insertError;
+      }
+    }
+    async loadAll() {
+      const [recipesRes, mealsRes, groceriesRes] = await Promise.all([
+        this.client.from('recipes').select('*').order('created_at', { ascending: true }),
+        this.client.from('weekly_meals').select('*').order('meal_date', { ascending: true }),
+        this.client.from('grocery_items').select('*').order('created_at', { ascending: true })
+      ]);
+      const error = recipesRes.error || mealsRes.error || groceriesRes.error;
+      if (error) throw error;
+      return { recipes: recipesRes.data, meals: mealsRes.data, groceries: groceriesRes.data };
+    }
+    async saveRecipe(recipe) {
+      const payload = { ...cleanRecipePayload(recipe), user_id: this.user.id };
+      if (recipe.id) {
+        const { data, error } = await this.client.from('recipes').update(payload).eq('id', recipe.id).select().single();
+        if (error) throw error;
+        return data;
+      }
+      const { data, error } = await this.client.from('recipes').insert(payload).select().single();
+      if (error) throw error;
+      return data;
+    }
+    async saveRecipes(items) {
+      const added = [];
+      for (let i = 0; i < items.length; i += 50) {
+        const rows = items.slice(i, i + 50).map(recipe => ({ ...cleanRecipePayload(recipe), user_id: this.user.id }));
+        const { data, error } = await this.client.from('recipes').insert(rows).select();
+        if (error) throw error;
+        added.push(...(data || []));
+      }
+      return added;
+    }
+    async deleteRecipe(recipeId) {
+      const { error: mealError } = await this.client.from('weekly_meals').delete().eq('recipe_id', recipeId);
+      if (mealError) throw mealError;
+      const { error } = await this.client.from('recipes').delete().eq('id', recipeId);
+      if (error) throw error;
+    }
+    async upsertMeal(meal) {
+      const payload = { ...cleanMealPayload(meal), user_id: this.user.id };
+      delete payload.id;
+      const { data, error } = await this.client.from('weekly_meals')
+        .upsert(payload, { onConflict: 'user_id,meal_date' }).select().single();
+      if (error) throw error;
+      return data;
+    }
+    async deleteMeal(mealDate) {
+      const { error } = await this.client.from('weekly_meals').delete().eq('meal_date', mealDate);
+      if (error) throw error;
+    }
+    async replaceAutoGroceries(start, generated) {
+      const { error: deleteError } = await this.client.from('grocery_items')
+        .delete().eq('week_start', start).eq('manual', false);
+      if (deleteError) throw deleteError;
+      if (generated.length) {
+        const rows = generated.map(g => ({ ...g, user_id: this.user.id }));
+        const { error } = await this.client.from('grocery_items').insert(rows);
+        if (error) throw error;
+      }
+    }
+    async saveGrocery(item) {
+      const payload = { ...item, user_id: this.user.id };
+      delete payload.created_at;
+      if (item.id) {
+        const { data, error } = await this.client.from('grocery_items').update(payload).eq('id', item.id).select().single();
+        if (error) throw error;
+        return data;
+      }
+      delete payload.id;
+      const { data, error } = await this.client.from('grocery_items').insert(payload).select().single();
+      if (error) throw error;
+      return data;
+    }
+    async deleteGrocery(id) {
+      const { error } = await this.client.from('grocery_items').delete().eq('id', id);
+      if (error) throw error;
+    }
+    async clearChecked(start) {
+      const { error } = await this.client.from('grocery_items').delete().eq('week_start', start).eq('checked', true);
+      if (error) throw error;
+    }
+    async clearWeek(start) {
+      const { error } = await this.client.from('grocery_items').delete().eq('week_start', start);
+      if (error) throw error;
+    }
+  }
+
+  async function start() {
+    root.addEventListener('click', handleClick);
+    root.addEventListener('input', handleInput);
+    root.addEventListener('change', handleChange);
+    root.addEventListener('submit', handleSubmit);
+
+    if (sharedMode) {
+      const { data } = await sb.auth.getSession();
+      if (!data.session) {
+        state.loading = false;
+        renderAuth();
+        sb.auth.onAuthStateChange((_event, session) => {
+          if (session?.user && !state.user) initializeShared(session.user);
+        });
+        return;
+      }
+      await initializeShared(data.session.user);
+    } else {
+      state.user = { id: 'demo', email: 'Demo Mode' };
+      store = new LocalStore();
+      await store.initialize();
+      await reloadData();
+      state.loading = false;
+      render();
+    }
+  }
+
+  async function initializeShared(user) {
+    state.user = user;
+    store = new SupabaseStore(sb, user);
+    try {
+      await store.initialize();
+      await reloadData();
+      startRealtime(user.id);
+      state.loading = false;
+      render();
+    } catch (error) {
+      state.loading = false;
+      state.authError = `Shared setup needs attention: ${error.message}`;
+      renderAuth(true);
+    }
+  }
+
+  function startRealtime(userId) {
+    if (!sb || realtimeChannel) return;
+    realtimeChannel = sb.channel(`mealz-${userId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'recipes', filter: `user_id=eq.${userId}` }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'weekly_meals', filter: `user_id=eq.${userId}` }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'grocery_items', filter: `user_id=eq.${userId}` }, scheduleReload)
+      .subscribe();
+  }
+
+  function scheduleReload() {
+    clearTimeout(reloadTimer);
+    reloadTimer = setTimeout(async () => {
+      await reloadData();
+      render();
+    }, 250);
+  }
+
+  async function reloadData() {
+    if (!store) return;
+    const data = await store.loadAll();
+    state.recipes = data.recipes || [];
+    state.meals = data.meals || [];
+    state.groceries = data.groceries || [];
+  }
+
+  function renderAuth(setupError = false) {
+    root.innerHTML = `
+      <main class="auth-shell">
+        <section class="auth-card">
+          <div class="auth-logo">🍽</div>
+          <h1>Mealz</h1>
+          <p>One shared login for the two of you. Sign in with the same account on both phones and your week, recipes, and grocery list stay together.</p>
+          ${setupError ? `<div class="error-box">${escapeHtml(state.authError)}</div>` : ''}
+          ${state.authError && !setupError ? `<div class="error-box">${escapeHtml(state.authError)}</div>` : ''}
+          ${state.authMessage ? `<div class="success-box">${escapeHtml(state.authMessage)}</div>` : ''}
+          <form id="auth-form" class="auth-form">
+            <input class="text-input" name="email" type="email" autocomplete="email" placeholder="Email" required />
+            <input class="text-input" name="password" type="password" autocomplete="current-password" placeholder="Password" minlength="6" required />
+            <div class="auth-actions">
+              <button class="btn btn-primary btn-wide" type="submit" data-auth-action="signin">Sign In</button>
+              <button class="btn btn-outline btn-wide" type="button" data-action="signup">Create Shared Account</button>
+            </div>
+          </form>
+          <p style="font-size:12px;margin-bottom:0">Use one household email/password on both devices. You can change this to separate profiles later if you ever want them.</p>
+        </section>
+      </main>`;
+  }
+
+  function captureViewState() {
+    const active = document.activeElement;
+    const snapshot = {
+      pageScroll: window.scrollY,
+      modalScroll: document.querySelector('.modal')?.scrollTop || 0,
+      chipScrolls: [...document.querySelectorAll('.chip-row')].map(el => el.scrollLeft),
+      focusId: active && active.id ? active.id : '',
+      selectionStart: null,
+      selectionEnd: null
+    };
+    if (snapshot.focusId && typeof active.selectionStart === 'number') {
+      snapshot.selectionStart = active.selectionStart;
+      snapshot.selectionEnd = active.selectionEnd;
+    }
+    return snapshot;
+  }
+
+  function restoreViewState(snapshot) {
+    if (!snapshot) return;
+    const modal = document.querySelector('.modal');
+    if (modal && snapshot.modalScroll) modal.scrollTop = snapshot.modalScroll;
+    [...document.querySelectorAll('.chip-row')].forEach((el, index) => {
+      if (snapshot.chipScrolls[index]) el.scrollLeft = snapshot.chipScrolls[index];
+    });
+    if (snapshot.pageScroll) window.scrollTo(0, snapshot.pageScroll);
+    if (!snapshot.focusId) return;
+    const field = document.getElementById(snapshot.focusId);
+    if (!field) return;
+    field.focus({ preventScroll: true });
+    if (snapshot.selectionStart != null && typeof field.setSelectionRange === 'function') {
+      try { field.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd); } catch { /* ignore */ }
+    }
+  }
+
+  function render() {
+    const snapshot = captureViewState();
+    renderNow();
+    restoreViewState(snapshot);
+  }
+
+  function renderNow() {
+    if (state.loading) {
+      root.innerHTML = `<main class="auth-shell"><div class="auth-card"><strong>Loading Mealz…</strong></div></main>`;
+      return;
+    }
+    if (state.cook) {
+      renderCook();
+      return;
+    }
+
+    root.innerHTML = `
+      <div class="app-shell">
+        <header class="topbar">
+          <div class="brand-wrap">
+            <div class="brand-mark">🍽</div>
+            <div><div class="brand">Meal<span class="brand-z">z</span></div><div class="subbrand">plan, eat, survive</div></div>
+          </div>
+          <div class="mode-pill">${sharedMode ? '☁ Shared household' : '◉ Demo on this device'}</div>
+        </header>
+        <main class="main-content">${renderView()}</main>
+      </div>
+      ${renderBottomNav()}
+      ${state.modal ? renderModal() : ''}`;
+  }
+
+  function renderView() {
+    if (state.view === 'recipes') return renderRecipes();
+    if (state.view === 'grocery') return renderGrocery();
+    if (state.view === 'more') return renderMore();
+    return renderWeek();
+  }
+
+  function renderBottomNav() {
+    const items = [
+      ['week', '📅', 'Week'], ['recipes', '🍽', 'Recipes'], ['grocery', '🛒', 'Grocery'], ['more', '•••', 'More']
+    ];
+    return `<nav class="bottom-nav" aria-label="Main navigation">
+      ${items.map(([key, icon, label]) => `
+        <button type="button" class="nav-btn ${state.view === key ? 'active' : ''}" data-action="nav" data-view="${key}">
+          <span class="nav-icon">${icon}</span><span>${label}</span>
+        </button>`).join('')}
+    </nav>`;
+  }
+
+  function weekTitle() {
+    const current = startOfWeek(new Date());
+    const diff = Math.round((state.weekStart - current) / (7 * 24 * 60 * 60 * 1000));
+    if (diff === 0) return 'This Week';
+    if (diff === 1) return 'Next Week';
+    if (diff === -1) return 'Last Week';
+    return diff > 1 ? `${diff} Weeks Ahead` : `${Math.abs(diff)} Weeks Ago`;
+  }
+
+  function mealForDate(key) {
+    return state.meals.find(m => m.meal_date === key);
+  }
+
+  function recipeById(id) {
+    return state.recipes.find(r => r.id === id);
+  }
+
+  const DEFAULT_DISH_TYPES = ['Chicken', 'Beef', 'Pork', 'Turkey', 'Seafood', 'Lamb', 'Vegetarian', 'Pasta', 'Soup', 'Other'];
+
+  function dishTypeOf(recipe) {
+    const tagged = (recipe?.tags || []).find(tag => /^dish:/i.test(String(tag)));
+    if (tagged) return String(tagged).replace(/^dish:/i, '').trim() || 'Other';
+    const inferred = window.MealzRecipeKeeper?.inferDishType?.({
+      name: recipe?.name || '',
+      ingredients: recipe?.ingredients || [],
+      categories: recipe?.tags || [],
+      courses: []
+    });
+    return inferred || 'Other';
+  }
+
+  function visibleRecipeTags(recipe) {
+    return (recipe?.tags || []).filter(tag => !/^dish:/i.test(String(tag)) && !/^Recipe Keeper$/i.test(String(tag)));
+  }
+
+  function dishTypeOptions() {
+    const used = state.recipes.map(dishTypeOf).filter(Boolean);
+    return [...new Set([...DEFAULT_DISH_TYPES, ...used])];
+  }
+
+  function withDishTypeTag(tags, dishType) {
+    const cleaned = (tags || []).filter(tag => !/^dish:/i.test(String(tag)));
+    const type = String(dishType || 'Other').trim() || 'Other';
+    return [`dish:${type}`, ...cleaned];
+  }
+
+  function mealClass(meal, recipe) {
+    if (!meal) return 'open';
+    if (meal.type === 'leftover') return 'leftover';
+    if (meal.type === 'eatout') return 'eatout';
+    if (recipe?.is_new) return 'new';
+    if ((Number(recipe?.prep_minutes || 0) + Number(recipe?.cook_minutes || 0)) <= 30) return 'quick';
+    return 'meal';
+  }
+
+  function mealDisplay(meal) {
+    if (!meal) return { name: '', meta: '' };
+    if (meal.type === 'eatout') return { name: meal.label || 'Eating Out', meta: 'No groceries needed' };
+    const recipe = recipeById(meal.recipe_id);
+    const name = recipe?.name || meal.label || 'Meal';
+    if (meal.type === 'leftover') return { name: `Leftovers: ${name}`, meta: 'Easy night' };
+    const total = Number(recipe?.prep_minutes || 0) + Number(recipe?.cook_minutes || 0);
+    return { name, meta: `${total || '?'} min · ${recipe?.difficulty || 'Easy'}` };
+  }
+
+  function renderWeek() {
+    const today = new Date();
+    const days = Array.from({ length: 7 }, (_, i) => addDays(state.weekStart, i));
+
+    return `
+      <section class="week-panel">
+        <div class="week-head">
+          <div><div class="week-kicker">Dinner Plan</div><div class="week-title-big">${weekTitle()}</div><div class="week-range">${formatWeekRange(state.weekStart)}</div></div>
+          <div class="week-nav-buttons"><button type="button" class="icon-btn" data-action="previous-week" aria-label="Previous week">‹</button><button type="button" class="icon-btn" data-action="next-week" aria-label="Next week">›</button></div>
+        </div>
+        <div class="week-list">
+          ${days.map(day => renderDay(day, sameDay(day, today))).join('')}
+        </div>
+        <div class="legend" aria-label="Calendar color key">
+          <span class="legend-item"><i class="legend-dot dot-meal"></i> Planned</span>
+          <span class="legend-item"><i class="legend-dot dot-quick"></i> Quick</span>
+          <span class="legend-item"><i class="legend-dot dot-leftover"></i> Leftovers</span>
+          <span class="legend-item"><i class="legend-dot dot-new"></i> New</span>
+          <span class="legend-item"><i class="legend-dot dot-open"></i> Open</span>
+        </div>
+      </section>
+      <section class="tile-grid">
+        <button type="button" class="tile" data-action="build-grocery"><span class="tile-icon">🛒</span><strong>Grocery List</strong><span>Build from this week</span></button>
+        <button type="button" class="tile" data-action="recommend-week"><span class="tile-icon">✨</span><strong>Help Me Pick</strong><span>Suggestions for the week</span></button>
+      </section>`;
+  }
+
+  function renderDay(day, isToday) {
+    const key = dateKey(day);
+    const meal = mealForDate(key);
+    const recipe = meal?.recipe_id ? recipeById(meal.recipe_id) : null;
+    const display = mealDisplay(meal);
+    const type = mealClass(meal, recipe);
+    const note = String(meal?.notes || '').trim();
+    return `<article class="day-row ${isToday ? 'today' : ''}">
+      <div class="day-date-col"><span class="day-name">${day.toLocaleDateString(undefined, { weekday: 'short' })}</span><span class="day-date">${day.getDate()}</span></div>
+      ${meal
+        ? `<button type="button" class="day-meal-btn type-${type}" data-action="open-meal" data-date="${key}">
+             <span class="meal-name">${escapeHtml(display.name)}</span>
+             <span class="meal-meta">${escapeHtml(display.meta)}</span>
+             ${note ? `<span class="meal-note-flag">📝 ${escapeHtml(note.length > 46 ? `${note.slice(0, 46)}…` : note)}</span>` : ''}
+           </button>`
+        : `<button type="button" class="day-plan-btn" data-action="plan-date" data-date="${key}">+ Plan dinner</button>`}
+    </article>`;
+  }
+
+  const DISH_ICONS = {
+    Chicken: '🍗', Beef: '🥩', Pork: '🥓', Turkey: '🦃', Seafood: '🐟', Lamb: '🐑',
+    Vegetarian: '🥦', Pasta: '🍝', Soup: '🥣', Other: '🍽'
+  };
+
+  function dishIcon(recipe) {
+    return DISH_ICONS[dishTypeOf(recipe)] || '🍽';
+  }
+
+  function matchesSearch(recipe, query) {
+    if (!query) return true;
+    return [recipe.name, recipe.cuisine, dishTypeOf(recipe), ...visibleRecipeTags(recipe)]
+      .join(' ').toLowerCase().includes(query);
+  }
+
+  function sortByName(list) {
+    return [...list].sort((a, b) => Number(b.favorite) - Number(a.favorite) || String(a.name).localeCompare(String(b.name)));
+  }
+
+  function dishTypesInUse() {
+    return [...new Set(state.recipes.map(dishTypeOf).filter(Boolean))].sort((a, b) => {
+      const ia = DEFAULT_DISH_TYPES.indexOf(a), ib = DEFAULT_DISH_TYPES.indexOf(b);
+      if (ia >= 0 || ib >= 0) return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
+      return a.localeCompare(b);
+    });
+  }
+
+  function filteredRecipes() {
+    const q = state.recipeSearch.trim().toLowerCase();
+    return sortByName(state.recipes.filter(r => matchesSearch(r, q) && passesFilter(r, 'recipes')));
+  }
+
+  function recipeListInner(recipes) {
+    return recipes.length
+      ? recipes.map(r => renderRecipeTile(r, 'view-recipe')).join('')
+      : '<div class="panel empty-state" style="grid-column:1/-1"><strong>No recipes found.</strong>Try another search or clear the filters.</div>';
+  }
+
+  function recipeHeadInner(recipes) {
+    const f = filterFor('recipes');
+    const label = f.favoritesOnly ? 'Favorites' : f.types.length === 1 ? f.types[0] : 'Recipes';
+    return `<h3>${escapeHtml(label)}</h3><span>${recipes.length} ${recipes.length === 1 ? 'recipe' : 'recipes'}</span>`;
+  }
+
+  function renderFilterBar(context) {
+    const f = filterFor(context);
+    const count = filterCount(context);
+    const inputId = context === 'plan' ? 'plan-search' : 'recipe-search';
+    const value = context === 'plan' ? state.planSearch : state.recipeSearch;
+    return `<div class="sticky-head">
+      <div class="filter-bar">
+        <input id="${inputId}" class="search-input" type="search" placeholder="Search recipes" value="${escapeHtml(value)}" />
+        <button type="button" class="filter-btn ${count ? 'active' : ''}" data-action="open-filter" data-context="${context}">☰ Filter${count ? ` (${count})` : ''}</button>
+        <button type="button" class="filter-btn heart-btn ${f.favoritesOnly ? 'active' : ''}" data-action="toggle-favorites-filter" data-context="${context}" aria-label="Show favorites only">${f.favoritesOnly ? '❤️' : '♡'}</button>
+      </div>
+    </div>`;
+  }
+
+  function renderRecipeTile(recipe, action, extra = '') {
+    const total = Number(recipe.prep_minutes || 0) + Number(recipe.cook_minutes || 0);
+    const type = dishTypeOf(recipe);
+    return `<div class="recipe-tile">
+      <button type="button" class="tile-main" data-action="${action}" data-recipe-id="${recipe.id}" ${extra}>
+        <span class="tile-art dish-${escapeHtml(String(type).replace(/[^a-z]/gi, ''))}">${dishIcon(recipe)}</span>
+        <span class="tile-body">
+          <span class="tile-name">${escapeHtml(recipe.name)}</span>
+          <span class="tile-meta">${escapeHtml(type)} · ${total || '?'} min${recipe.is_new ? ' · ✨' : ''}</span>
+        </span>
+      </button>
+      <button type="button" class="tile-fav" data-action="toggle-favorite" data-recipe-id="${recipe.id}" aria-label="Toggle favorite">${recipe.favorite ? '❤️' : '♡'}</button>
+    </div>`;
+  }
+
+  function renderRecipes() {
+    const recipes = filteredRecipes();
+    return `
+      <section>
+        ${renderFilterBar('recipes')}
+        <div class="list-head">${recipeHeadInner(recipes)}</div>
+        <div class="recipe-grid">${recipeListInner(recipes)}</div>
+      </section>
+      <section class="tile-grid" style="margin-top:14px">
+        <button type="button" class="tile" data-action="add-recipe"><span class="tile-icon">＋</span><strong>Add Recipe</strong><span>Link or manual entry</span></button>
+        <label class="tile recipekeeper-file-label" for="recipekeeper-file"><span class="tile-icon">⇩</span><strong>Import</strong><span>Recipe Keeper export</span><input id="recipekeeper-file" class="visually-hidden-file" type="file" accept=".zip,.html,.htm,text/html,application/zip" /></label>
+      </section>`;
+  }
+
+  function currentWeekGroceries() {
+    return state.groceries.filter(g => g.week_start === weekKey());
+  }
+
+  function renderGrocery() {
+    const items = currentWeekGroceries();
+    const remaining = items.filter(i => !i.checked).length;
+    const visible = state.hideChecked ? items.filter(i => !i.checked) : items;
+    const categories = ['Produce', 'Meat', 'Dairy', 'Bakery', 'Pantry', 'Frozen', 'Other'];
+    return `<section class="panel">
+      <div class="grocery-head">
+        <div><h2 class="section-title">Grocery List</h2><p class="section-subtitle">${formatWeekRange(state.weekStart)}</p></div>
+        <div class="count-line">${items.length ? `${remaining} of ${items.length} still to get` : 'Nothing on the list yet'}</div>
+      </div>
+      <form id="grocery-form" class="grocery-add">
+        <input class="text-input" name="name" placeholder="Add milk, fruit, snacks…" required />
+        <select class="select-input" name="category">${categories.map(c => `<option>${c}</option>`).join('')}</select>
+        <button class="btn btn-primary" type="submit">Add</button>
+      </form>
+      <div class="tile-grid" style="margin-top:12px">
+        <button type="button" class="tile" data-action="build-grocery"><span class="tile-icon">🔄</span><strong>Rebuild</strong><span>From this week's meals</span></button>
+        <button type="button" class="tile" data-action="toggle-hide-checked"><span class="tile-icon">${state.hideChecked ? '👁' : '🙈'}</span><strong>${state.hideChecked ? 'Show Checked' : 'Hide Checked'}</strong><span>${state.hideChecked ? 'Bring them back' : 'While you shop'}</span></button>
+        <button type="button" class="tile" data-action="clear-checked" ${items.some(i => i.checked) ? '' : 'disabled'}><span class="tile-icon">✓</span><strong>Clear Checked</strong><span>Remove what you got</span></button>
+        <button type="button" class="tile tile-danger" data-action="clear-all-groceries" ${items.length ? '' : 'disabled'}><span class="tile-icon">🗑</span><strong>Clear All</strong><span>Empty the whole list</span></button>
+      </div>
+    </section>
+    <section class="panel">
+      ${visible.length ? categories.map(cat => renderGroceryCategory(cat, visible.filter(i => (i.category || 'Other') === cat))).join('') : '<div class="empty-state"><strong>Nothing to show.</strong>Plan meals, then tap Grocery List on the plan screen. You can also add anything manually.</div>'}
+    </section>`;
+  }
+
+  function renderGroceryCategory(category, items) {
+    if (!items.length) return '';
+    const sorted = [...items].sort((a, b) => Number(a.checked) - Number(b.checked));
+    return `<div class="grocery-category"><h3>${escapeHtml(category)}</h3><div class="grocery-list">
+      ${sorted.map(item => `<label class="grocery-item ${item.checked ? 'checked' : ''}">
+        <input type="checkbox" data-action="toggle-grocery" data-id="${item.id}" ${item.checked ? 'checked' : ''} />
+        <span><span class="grocery-name">${escapeHtml(item.name)}</span>${item.amount ? `<span class="grocery-amount"> · ${escapeHtml(item.amount)}</span>` : ''}${item.manual ? '<span class="grocery-amount"> · added manually</span>' : ''}</span>
+        <button type="button" class="delete-item" data-action="delete-grocery" data-id="${item.id}" aria-label="Delete item">×</button>
+      </label>`).join('')}
+    </div></div>`;
+  }
+
+  function renderMore() {
+    return `<section class="panel">
+      <h2 class="section-title">More</h2><p class="section-subtitle">Keep the settings out of the way.</p>
+      <div class="more-list" style="margin-top:14px">
+        <div class="more-row"><div><strong>${sharedMode ? 'Shared Household' : 'Demo Mode'}</strong><span>${sharedMode ? escapeHtml(state.user?.email || 'Signed in') : 'Data is currently saved only on this device.'}</span></div><span>${sharedMode ? '☁' : '◉'}</span></div>
+        <div class="more-row"><div><strong>Recipe style</strong><span>Fast prep · healthy · lean protein · fresh vegetables · simple.</span></div><span>✓</span></div>
+        <div class="more-row"><div><strong>Favorite flavors</strong><span>Mexican · Greek · Peruvian · similar weeknight meals.</span></div><span>✓</span></div>
+        ${sharedMode ? '<div class="more-row"><div><strong>Account</strong><span>Mealz stays signed in on this device until you choose Sign Out.</span></div><button type="button" class="btn btn-outline btn-small" data-action="signout">Sign Out</button></div>' : '<div class="more-row"><div><strong>Reset demo</strong><span>Restore the sample recipes and clear local planning data.</span></div><button type="button" class="btn btn-outline btn-small" data-action="reset-demo">Reset</button></div>'}
+      </div>
+    </section>
+    <section class="panel"><h3 style="margin-top:0">Next upgrades</h3><p class="section-subtitle">Recipe Keeper bulk import is now built in. Prep-ahead mode and smarter “similar but new” suggestions are the next logical upgrades, using your growing Mealz history.</p></section>`;
+  }
+
+  function renderModal() {
+    if (state.modal.type === 'plan') return renderPlanModal();
+    if (state.modal.type === 'mealNight') return renderMealNightSheet();
+    if (state.modal.type === 'filter') return renderFilterSheet();
+    if (state.modal.type === 'leftoverPrompt') return renderLeftoverPrompt();
+    if (state.modal.type === 'recipeDetail') return renderRecipeDetailModal();
+    if (state.modal.type === 'addRecipe') return renderAddRecipeModal();
+    if (state.modal.type === 'chooseDay') return renderChooseDayModal();
+    if (state.modal.type === 'recommendWeek') return renderRecommendWeekModal();
+    if (state.modal.type === 'recipeKeeperPreview') return renderRecipeKeeperPreview();
+    return '';
+  }
+
+  function modalShell(title, subtitle, body) {
+    return `<div class="modal-backdrop" data-action="modal-backdrop"><section class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head"><div><h2 class="modal-title">${escapeHtml(title)}</h2>${subtitle ? `<div class="modal-subtitle">${escapeHtml(subtitle)}</div>` : ''}</div><button type="button" class="close-btn" data-action="close-modal" aria-label="${state.modalStack.length ? 'Back' : 'Close'}">${state.modalStack.length ? '‹' : '×'}</button></div>
+      ${body}
+    </section></div>`;
+  }
+
+  function renderRecipeKeeperPreview() {
+    const recipes = state.modal.recipes || [];
+    const skipped = state.modal.skipped || [];
+    const preview = recipes.slice(0, 14);
+    const body = `<div class="import-recipe-panel">
+      <div class="import-success"><strong>✓ Recipe Keeper file read</strong><span>${recipes.length} new ${recipes.length === 1 ? 'recipe' : 'recipes'} ready to add.${skipped.length ? ` ${skipped.length} existing ${skipped.length === 1 ? 'recipe was' : 'recipes were'} skipped.` : ''}</span></div>
+      <div class="rk-preview-list">${preview.map(recipe => `<div class="rk-preview-row"><div><strong>${escapeHtml(recipe.name)}</strong><span>${escapeHtml(dishTypeOf(recipe))}${recipe.cuisine ? ` · ${escapeHtml(recipe.cuisine)}` : ''}</span></div>${recipe.favorite ? '<span>❤️</span>' : ''}</div>`).join('')}${recipes.length > preview.length ? `<div class="rk-preview-more">+ ${recipes.length - preview.length} more</div>` : ''}</div>
+      ${skipped.length ? `<p class="form-help">Already in Mealz: ${escapeHtml(skipped.slice(0, 8).join(', '))}${skipped.length > 8 ? '…' : ''}</p>` : ''}
+      <button type="button" class="btn btn-primary btn-wide" data-action="import-recipekeeper-confirm" ${recipes.length ? '' : 'disabled'}>Import ${recipes.length} ${recipes.length === 1 ? 'Recipe' : 'Recipes'}</button>
+      <button type="button" class="btn btn-outline btn-wide" data-action="close-modal">Cancel</button>
+      <p class="form-help centered">Mealz imports the recipe text, times, favorites, source link, and Recipe Keeper categories. Photos stay in Recipe Keeper for now.</p>
+    </div>`;
+    return modalShell('Import Recipe Keeper', 'One bulk import instead of retyping your collection.', body);
+  }
+
+  function leftoverCandidates(key) {
+    const earlier = state.meals
+      .filter(m => m.type === 'meal' && m.meal_date < key && m.meal_date >= weekKey() && m.recipe_id)
+      .map(m => recipeById(m.recipe_id)).filter(Boolean);
+    return [...new Map(earlier.map(r => [r.id, r])).values()].reverse();
+  }
+
+  function planPickList() {
+    const key = state.modal.date;
+    const mode = state.modal.mode || 'suggested';
+    const q = state.planSearch.trim().toLowerCase();
+    const narrowed = q || filterCount('plan') || filterFor('plan').favoritesOnly;
+    let list = [];
+    if (mode === 'leftover') list = leftoverCandidates(key);
+    else if (narrowed) list = sortByName(state.recipes);
+    else list = getRecommendations();
+
+    list = list.filter(r => matchesSearch(r, q) && passesFilter(r, 'plan'));
+    if (mode !== 'leftover' && !narrowed) list = list.slice(0, 12);
+    return list;
+  }
+
+  function pickListInner(list, mode) {
+    return list.length
+      ? list.map(r => renderRecipeTile(r, 'select-plan-recipe', `data-leftover="${mode === 'leftover' ? 'true' : 'false'}"`)).join('')
+      : '<div class="panel empty-state" style="grid-column:1/-1"><strong>Nothing matches.</strong>Try another search or clear the filter.</div>';
+  }
+
+  function renderPlanModal() {
+    const key = state.modal.date;
+    const date = parseLocalDate(key);
+    const current = mealForDate(key);
+    const mode = state.modal.mode || 'suggested';
+    const list = planPickList();
+    const narrowed = state.planSearch.trim() || filterCount('plan') || filterFor('plan').favoritesOnly;
+
+    const body = `
+      ${renderFilterBar('plan')}
+      <div class="list-head">
+        <h3>${mode === 'leftover' ? 'Planned earlier this week' : narrowed ? 'Matches' : 'Suggested'}</h3>
+        <span>${list.length} ${list.length === 1 ? 'recipe' : 'recipes'}</span>
+      </div>
+      <div class="recipe-grid pick-list">${pickListInner(list, mode)}</div>
+      <div class="sheet-section">
+        <h3>Other options</h3>
+        <div class="tile-grid tile-grid-3">
+          ${mode === 'leftover'
+            ? '<button type="button" class="tile" data-action="plan-mode" data-mode="suggested"><span class="tile-icon">↩</span><strong>All Recipes</strong></button>'
+            : '<button type="button" class="tile" data-action="plan-mode" data-mode="leftover"><span class="tile-icon">🟡</span><strong>Leftovers</strong></button>'}
+          <button type="button" class="tile" data-action="set-eatout"><span class="tile-icon">🥡</span><strong>Eating Out</strong></button>
+          <button type="button" class="tile" data-action="add-recipe"><span class="tile-icon">＋</span><strong>New Recipe</strong></button>
+          ${current ? '<button type="button" class="tile tile-danger" data-action="clear-day"><span class="tile-icon">×</span><strong>Clear Day</strong></button>' : ''}
+        </div>
+      </div>`;
+    return modalShell(`Plan ${date.toLocaleDateString(undefined, { weekday: 'long' })}`, date.toLocaleDateString(undefined, { month: 'long', day: 'numeric' }), body);
+  }
+
+  function renderFilterSheet() {
+    const context = state.modal.context || 'recipes';
+    const f = filterFor(context);
+    const types = dishTypesInUse();
+    const body = `
+      <div class="sheet-section">
+        <h3>Dish type</h3>
+        <div class="filter-options">
+          ${types.length ? types.map(type => `<button type="button" class="filter-option ${f.types.includes(type) ? 'active' : ''}" data-action="filter-type" data-context="${context}" data-type="${escapeHtml(type)}"><span class="filter-check">${f.types.includes(type) ? '✓' : ''}</span>${escapeHtml(type)}</button>`).join('') : '<p class="form-help">No dish types yet.</p>'}
+        </div>
+        <p class="form-help">Pick as many as you want. New categories show up here automatically.</p>
+      </div>
+      <div class="sheet-section">
+        <h3>Total time</h3>
+        <div class="filter-list">
+          ${TIME_OPTIONS.map(([value, label]) => `<button type="button" class="filter-row ${f.time === value ? 'active' : ''}" data-action="filter-time" data-context="${context}" data-time="${value}"><span>${label}</span><span class="filter-check">${f.time === value ? '✓' : ''}</span></button>`).join('')}
+        </div>
+      </div>
+      <div class="sheet-section note-actions">
+        <button type="button" class="btn btn-outline" data-action="filter-clear" data-context="${context}">Clear Filter</button>
+        <button type="button" class="btn btn-primary" data-action="close-modal">Done</button>
+      </div>`;
+    return modalShell('Filter', 'Narrow the list down', body);
+  }
+
+  function renderMealNightSheet() {
+    const key = state.modal.date;
+    const date = parseLocalDate(key);
+    const meal = mealForDate(key);
+    if (!meal) return '';
+    const recipe = meal.recipe_id ? recipeById(meal.recipe_id) : null;
+    const display = mealDisplay(meal);
+    const type = mealClass(meal, recipe);
+    const noteValue = state.modal.noteDraft != null ? state.modal.noteDraft : String(meal.notes || '');
+    const nextKey = dateKey(addDays(date, 1));
+    const nextTaken = Boolean(mealForDate(nextKey));
+
+    const body = `
+      <div class="meal-hero type-${type}">
+        <strong>${escapeHtml(display.name)}</strong>
+        <span>${escapeHtml(display.meta)}</span>
+      </div>
+      <div class="sheet-section">
+        <h3>Notes for this night</h3>
+        <div class="note-block">
+          <textarea id="meal-note" class="textarea-input" placeholder="Potatoes as a side. Red and yellow bell peppers. Start it early.">${escapeHtml(noteValue)}</textarea>
+          <div class="note-actions">
+            <button type="button" class="btn btn-primary" data-action="save-note">Save Note</button>
+            <button type="button" class="btn btn-outline" data-action="note-to-grocery">Send to Grocery</button>
+          </div>
+        </div>
+      </div>
+      <div class="sheet-section">
+        <h3>Actions</h3>
+        <div class="tile-grid tile-grid-3">
+          ${recipe ? `<button type="button" class="tile" data-action="view-recipe" data-recipe-id="${recipe.id}"><span class="tile-icon">📖</span><strong>Recipe</strong></button>` : ''}
+          ${recipe ? `<button type="button" class="tile" data-action="cook" data-recipe-id="${recipe.id}"><span class="tile-icon">👨‍🍳</span><strong>Cook</strong></button>` : ''}
+          <button type="button" class="tile" data-action="plan-date" data-date="${key}"><span class="tile-icon">🔄</span><strong>Swap</strong></button>
+          ${recipe && meal.type === 'meal' ? `<button type="button" class="tile" data-action="leftovers-tomorrow" data-date="${key}" data-recipe-id="${recipe.id}" ${nextTaken ? 'disabled' : ''}><span class="tile-icon">🟡</span><strong>Leftovers</strong></button>` : ''}
+          <button type="button" class="tile tile-danger" data-action="clear-day"><span class="tile-icon">×</span><strong>Clear</strong></button>
+        </div>
+      </div>`;
+    return modalShell(date.toLocaleDateString(undefined, { weekday: 'long' }), date.toLocaleDateString(undefined, { month: 'long', day: 'numeric' }), body);
+  }
+
+  function renderLeftoverPrompt() {
+    const recipe = recipeById(state.modal.recipeId);
+    const next = addDays(parseLocalDate(state.modal.date), 1);
+    const nextKey = dateKey(next);
+    const nextMeal = mealForDate(nextKey);
+    const body = `<div class="panel"><p style="margin-top:0">Make enough <strong>${escapeHtml(recipe?.name || 'food')}</strong> for tomorrow too?</p>
+      <div class="tile-grid"><button type="button" class="tile" data-action="add-leftover-next" ${nextMeal ? 'disabled' : ''}><span class="tile-icon">🟡</span><strong>Yes, ${next.toLocaleDateString(undefined, { weekday: 'long' })}</strong><span>${nextMeal ? 'That day already has a plan.' : 'Tomorrow becomes leftovers.'}</span></button><button type="button" class="tile" data-action="close-modal"><span class="tile-icon">↩</span><strong>No Thanks</strong><span>Just this one night.</span></button></div></div>`;
+    return modalShell('Plan leftovers?', 'This is the easiest way to stretch one dinner into two nights.', body);
+  }
+
+  function renderRecipeDetailModal() {
+    const recipe = recipeById(state.modal.recipeId);
+    if (!recipe) return '';
+    const total = Number(recipe.prep_minutes || 0) + Number(recipe.cook_minutes || 0);
+    const body = `
+      <div class="tile-grid">
+        <button type="button" class="tile" data-action="cook" data-recipe-id="${recipe.id}"><span class="tile-icon">👨‍🍳</span><strong>Start Cooking</strong></button>
+        <button type="button" class="tile" data-action="plan-recipe" data-recipe-id="${recipe.id}"><span class="tile-icon">📅</span><strong>Plan This</strong></button>
+      </div>
+      <div class="recipe-detail panel" style="margin-top:12px">
+        <div class="detail-meta">${escapeHtml(dishTypeOf(recipe))} · ${escapeHtml(recipe.cuisine || 'Dinner')} · ${total} min · ${escapeHtml(recipe.difficulty || 'Easy')}</div>
+        <h3>Ingredients</h3><ul class="ingredient-list">${(recipe.ingredients || []).map(i => `<li>${escapeHtml(i.amount || '')} ${escapeHtml(i.name || '')}</li>`).join('')}</ul>
+        <h3>Directions</h3><ol class="step-list">${(recipe.steps || []).map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ol>
+        ${recipe.source_url ? `<p class="recipe-source-note">Saved cleanly in Mealz · <a class="source-link" href="${escapeHtml(recipe.source_url)}" target="_blank" rel="noopener">Source ↗</a></p>` : ''}
+      </div>
+      <div class="sheet-section">
+        <h3>Manage</h3>
+        <div class="tile-grid tile-grid-3">
+          <button type="button" class="tile" data-action="edit-recipe" data-recipe-id="${recipe.id}"><span class="tile-icon">✎</span><strong>Edit</strong></button>
+          <button type="button" class="tile" data-action="duplicate-recipe" data-recipe-id="${recipe.id}"><span class="tile-icon">⧉</span><strong>Duplicate</strong></button>
+          <button type="button" class="tile tile-danger" data-action="delete-recipe" data-recipe-id="${recipe.id}"><span class="tile-icon">🗑</span><strong>Delete</strong></button>
+        </div>
+      </div>`;
+    return modalShell(recipe.name, recipe.favorite ? '❤️ Favorite' : '', body);
+  }
+
+  function renderAddRecipeModal() {
+    const mode = state.modal.mode || 'import';
+    if (mode === 'import') {
+      const body = `<form id="recipe-import-form" class="import-recipe-panel">
+        <div class="import-hero"><div class="import-icon">↗</div><div><strong>Paste a recipe link</strong><span>Mealz pulls out the ingredients and directions and leaves the ads, popups, stories, and clutter behind.</span></div></div>
+        ${state.modal.error ? `<div class="error-box">${escapeHtml(state.modal.error)}</div>` : ''}
+        <div class="form-field"><label>Recipe URL</label><input class="text-input" name="url" type="url" inputmode="url" autocomplete="url" required placeholder="https://www.example.com/recipe" value="${escapeHtml(state.modal.url || '')}" /></div>
+        <button class="btn btn-primary btn-wide" type="submit" ${state.modal.importing ? 'disabled' : ''}>${state.modal.importing ? 'Importing…' : 'Import Clean Recipe'}</button>
+        <button class="btn btn-outline btn-wide" type="button" data-action="manual-recipe">Enter Recipe Manually</button>
+        <p class="form-help centered">The original site is kept only as the recipe source. You cook from the clean copy saved in Mealz.</p>
+      </form>`;
+      return modalShell('Add Recipe', 'The easy way is a link.', body);
+    }
+
+    const editRecipe = mode === 'edit' ? recipeById(state.modal.recipeId) : null;
+    const imported = mode === 'review' || mode === 'duplicate' ? (state.modal.imported || {}) : (editRecipe || {});
+    const ingredientText = (imported.ingredients || []).map(i => `${i.amount || ''} | ${i.name || ''} | ${i.category || 'Other'}`).join('\n');
+    const stepText = (imported.steps || []).join('\n');
+    const sourceUrl = imported.source_url || '';
+    const sourceHost = (() => { try { return new URL(sourceUrl).hostname.replace(/^www\./, ''); } catch { return ''; } })();
+    const dishType = imported.dish_type || dishTypeOf(imported);
+    const dishOptions = dishTypeOptions();
+    const body = `<form id="recipe-form" class="form-grid">
+      ${mode === 'edit' ? `<input type="hidden" name="recipe_id" value="${escapeHtml(editRecipe?.id || '')}" />` : ''}
+      ${mode === 'review' ? `<div class="import-success full"><strong>✓ Recipe cleaned up</strong><span>Review it if you want, then save it to Mealz.${sourceHost ? ` Source: ${escapeHtml(sourceHost)}` : ''}</span></div>` : ''}
+      ${mode === 'duplicate' ? '<div class="import-success full"><strong>Duplicate recipe</strong><span>Give the copy a name and make any changes before saving.</span></div>' : ''}
+      <div class="form-field full"><label>Recipe name</label><input class="text-input" name="name" required placeholder="Greek lemon chicken bowls" value="${escapeHtml(imported.name || '')}" /></div>
+      <div class="form-field"><label>Dish type</label><input class="text-input" name="dish_type" list="dish-type-options" placeholder="Chicken" value="${escapeHtml(dishType === 'Other' && !imported.name ? '' : dishType)}" /><datalist id="dish-type-options">${dishOptions.map(type => `<option value="${escapeHtml(type)}"></option>`).join('')}</datalist><div class="form-help">Pick one you've used before or type a new one.</div></div>
+      <div class="form-field"><label>Cuisine</label><input class="text-input" name="cuisine" placeholder="Greek" value="${escapeHtml(imported.cuisine || '')}" /></div>
+      <div class="form-field"><label>Difficulty</label><select class="select-input" name="difficulty"><option ${imported.difficulty === 'Very Easy' ? 'selected' : ''}>Very Easy</option><option ${!imported.difficulty || imported.difficulty === 'Easy' ? 'selected' : ''}>Easy</option><option ${imported.difficulty === 'Moderate' ? 'selected' : ''}>Moderate</option></select></div>
+      <div class="form-field"><label>Prep minutes</label><input class="text-input" name="prep_minutes" type="number" min="0" max="240" value="${escapeHtml(imported.prep_minutes ?? 15)}" /></div>
+      <div class="form-field"><label>Cook minutes</label><input class="text-input" name="cook_minutes" type="number" min="0" max="360" value="${escapeHtml(imported.cook_minutes ?? 20)}" /></div>
+      <div class="form-field full"><label>Ingredients</label><textarea class="textarea-input" name="ingredients" placeholder="2 lb | chicken breast | Meat\n3 | bell peppers | Produce\n2 cups | rice | Pantry">${escapeHtml(ingredientText)}</textarea><div class="form-help">One per line: amount | ingredient | category</div></div>
+      <div class="form-field full"><label>Directions</label><textarea class="textarea-input" name="steps" placeholder="Start the rice.\nSlice the chicken and vegetables.\nCook until done.">${escapeHtml(stepText)}</textarea><div class="form-help">One step per line.</div></div>
+      ${mode === 'review' && sourceUrl ? `<input type="hidden" name="source_url" value="${escapeHtml(sourceUrl)}" />` : `<div class="form-field full"><label>Recipe source URL (optional)</label><input class="text-input" name="source_url" type="url" placeholder="https://…" value="${escapeHtml(sourceUrl)}" /></div>`}
+      <div class="form-field full"><button class="btn btn-primary btn-wide" type="submit">${mode === 'edit' ? 'Save Changes' : 'Save Recipe'}</button></div>
+      ${mode === 'review' ? '<div class="form-field full"><button class="btn btn-outline btn-wide" type="button" data-action="import-recipe-mode">Try Another Link</button></div>' : (mode === 'edit' || mode === 'duplicate' ? '' : '<div class="form-field full"><button class="btn btn-outline btn-wide" type="button" data-action="import-recipe-mode">Import From URL Instead</button></div>')}
+    </form>`;
+    const modalTitle = mode === 'review' ? 'Review Recipe' : mode === 'edit' ? 'Edit Recipe' : mode === 'duplicate' ? 'Duplicate Recipe' : 'Add Recipe';
+    const modalSubtitle = mode === 'review' ? 'Mealz found the useful part.' : mode === 'edit' ? 'Change the name or anything else.' : mode === 'duplicate' ? 'Start with a copy, then make it yours.' : 'Keep it simple. You can always improve it after you cook it.';
+    return modalShell(modalTitle, modalSubtitle, body);
+  }
+
+  function renderChooseDayModal() {
+    const recipe = recipeById(state.modal.recipeId);
+    const days = Array.from({ length: 7 }, (_, i) => addDays(state.weekStart, i));
+    const body = `<div class="pick-list">${days.map(day => {
+      const key = dateKey(day);
+      const meal = mealForDate(key);
+      return `<button type="button" class="pick-row" data-action="choose-day-for-recipe" data-date="${key}"><span><strong>${day.toLocaleDateString(undefined, { weekday: 'long' })}</strong><small>${day.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}${meal ? ` · ${escapeHtml(mealDisplay(meal).name)}` : ' · Open'}</small></span><span class="pick-go">${meal ? 'Replace' : 'Pick'}</span></button>`;
+    }).join('')}</div>`;
+    return modalShell('Choose a day', recipe?.name || '', body);
+  }
+
+  function renderRecommendWeekModal() {
+    const picks = getRecommendations().slice(0, 4);
+    const body = `<p class="section-subtitle" style="margin-bottom:12px">These are weighted toward short prep, healthy ingredients, lean protein, fresh vegetables, your favorite cuisines, and meals worth eating again tomorrow.</p>
+      <div class="recipe-grid">${picks.map(r => renderRecipeTile(r, 'select-plan-recipe', 'data-leftover="false"')).join('')}</div>`;
+    return modalShell('Good fits for this week', 'Pick one and then choose the day.', body);
+  }
+
+  function getRecommendations() {
+    const start = weekKey();
+    const end = dateKey(addDays(state.weekStart, 6));
+    const planned = new Set(state.meals.filter(m => m.type === 'meal' && m.meal_date >= start && m.meal_date <= end).map(m => m.recipe_id));
+    return [...state.recipes].sort((a, b) => recommendationScore(b, planned) - recommendationScore(a, planned));
+  }
+
+  function recommendationScore(recipe, planned) {
+    let score = 0;
+    const total = Number(recipe.prep_minutes || 0) + Number(recipe.cook_minutes || 0);
+    if (recipe.rating === 'makeagain') score += 5;
+    if (recipe.rating === 'nope') score -= 20;
+    if (recipe.favorite) score += 4;
+    if (recipe.is_new) score += 3;
+    if (Number(recipe.prep_minutes || 0) <= 15) score += 4;
+    if (total <= 30) score += 4; else if (total <= 40) score += 2;
+    if (['Mexican', 'Greek', 'Peruvian'].includes(recipe.cuisine)) score += 4;
+    const tags = new Set(recipe.tags || []);
+    ['lean protein', 'fresh vegetables', 'good leftovers', 'quick', 'one pan'].forEach(t => { if (tags.has(t)) score += 2; });
+    if (planned.has(recipe.id)) score -= 5;
+    return score;
+  }
+
+  function recommendationReason(recipe) {
+    const total = Number(recipe.prep_minutes || 0) + Number(recipe.cook_minutes || 0);
+    if (recipe.is_new && ['Mexican', 'Greek', 'Peruvian'].includes(recipe.cuisine)) return `New ${recipe.cuisine} idea that fits your usual style`;
+    if (recipe.is_new) return 'Something new with familiar weeknight effort';
+    if (recipe.favorite) return 'A favorite you already trust';
+    if (total <= 30) return 'Fast and easy for a busy night';
+    return 'Simple, healthy weeknight fit';
+  }
+
+  function renderCook() {
+    const recipe = recipeById(state.cook.recipeId);
+    if (!recipe) { state.cook = null; render(); return; }
+    const steps = recipe.steps || [];
+    if (state.cook.finished || !steps.length) {
+      root.innerHTML = `<div class="app-shell"><main class="cook-shell"><div class="cook-top"><button type="button" class="btn btn-outline" data-action="close-cook">← Back</button><div class="cook-progress">Dinner done</div></div><section class="cook-card rating-panel"><h1 style="margin-top:0">How was it?</h1><p class="section-subtitle">One tap helps Mealz make better suggestions.</p><div class="rating-buttons"><button type="button" class="btn btn-primary" data-action="rate" data-rating="makeagain">👍 Make Again</button><button type="button" class="btn" data-action="rate" data-rating="fine">😐 It Was Fine</button><button type="button" class="btn btn-danger" data-action="rate" data-rating="nope">👎 Skip Next Time</button></div></section></main></div>`;
+      return;
+    }
+    const step = Math.min(state.cook.step, steps.length - 1);
+    root.innerHTML = `<div class="app-shell"><main class="cook-shell"><div class="cook-top"><button type="button" class="btn btn-outline" data-action="close-cook">← Exit</button><div class="cook-progress">${escapeHtml(recipe.name)}</div></div><section class="cook-card"><div class="cook-step-number">Step ${step + 1} of ${steps.length}</div><div class="cook-step">${escapeHtml(steps[step])}</div><div class="cook-controls">${step > 0 ? '<button type="button" class="btn btn-outline" data-action="cook-prev">Back</button>' : ''}<button type="button" class="btn btn-primary" style="flex:1" data-action="cook-next">${step === steps.length - 1 ? 'Finish Dinner' : 'Next Step'}</button></div></section></main></div>`;
+  }
+
+  async function handleClick(event) {
+    const button = event.target.closest('[data-action]');
+    if (!button) return;
+    const action = button.dataset.action;
+
+    try {
+      if (action === 'nav') { state.view = button.dataset.view; resetModals(); render(); window.scrollTo(0, 0); return; }
+      if (action === 'open-meal') { state.modal = { type: 'mealNight', date: button.dataset.date }; render(); return; }
+      if (action === 'save-note') { await saveMealNote(); return; }
+      if (action === 'note-to-grocery') { await sendNoteToGrocery(); return; }
+      if (action === 'leftovers-tomorrow') { await addLeftoverAfter(button.dataset.date, button.dataset.recipeId); return; }
+      if (action === 'open-filter') { pushModal({ type: 'filter', context: button.dataset.context || 'recipes' }); render(); return; }
+      if (action === 'toggle-favorites-filter') { const f = filterFor(button.dataset.context); f.favoritesOnly = !f.favoritesOnly; render(); return; }
+      if (action === 'filter-type') {
+        const f = filterFor(button.dataset.context); const type = button.dataset.type;
+        f.types = f.types.includes(type) ? f.types.filter(t => t !== type) : [...f.types, type];
+        render(); return;
+      }
+      if (action === 'filter-time') { filterFor(button.dataset.context).time = button.dataset.time || 'any'; render(); return; }
+      if (action === 'filter-clear') { state.filters[button.dataset.context] = { types: [], time: 'any', favoritesOnly: false }; render(); return; }
+      if (action === 'clear-all-groceries') { await clearAllGroceries(); return; }
+      if (action === 'toggle-hide-checked') { state.hideChecked = !state.hideChecked; render(); return; }
+      if (action === 'previous-week') { state.weekStart = addDays(state.weekStart, -7); render(); return; }
+      if (action === 'next-week') { state.weekStart = addDays(state.weekStart, 7); render(); return; }
+      if (action === 'plan-date') {
+        state.planSearch = '';
+        state.filters.plan = { types: [], time: 'any', favoritesOnly: false };
+        const next = { type: 'plan', date: button.dataset.date, mode: 'suggested' };
+        if (state.modal && state.modal.type === 'mealNight') pushModal(next); else resetModals(next);
+        render(); window.scrollTo(0, 0); return;
+      }
+      if (action === 'close-modal') { popModal(); render(); return; }
+      if (action === 'modal-backdrop' && event.target === button) { resetModals(); render(); return; }
+      if (action === 'plan-mode') { state.modal.mode = button.dataset.mode; render(); return; }
+      if (action === 'set-eatout') { await setEatingOut(); return; }
+      if (action === 'clear-day') { await store.deleteMeal(state.modal.date); await reloadData(); resetModals(); render(); toast('Day cleared'); return; }
+      if (action === 'select-plan-recipe') { if (state.modal?.type === 'recommendWeek') { state.modal = { type: 'chooseDay', recipeId: button.dataset.recipeId }; render(); } else { await selectPlanRecipe(button.dataset.recipeId, button.dataset.leftover === 'true'); } return; }
+      if (action === 'add-leftover-next') { await addLeftoverNext(); return; }
+      if (action === 'import-recipekeeper-confirm') { await importRecipeKeeperConfirmed(); return; }
+      if (action === 'add-recipe') { state.modal = { type: 'addRecipe' }; render(); return; }
+      if (action === 'manual-recipe') { state.modal = { type: 'addRecipe', mode: 'manual' }; render(); return; }
+      if (action === 'import-recipe-mode') { state.modal = { type: 'addRecipe', mode: 'import' }; render(); return; }
+      if (action === 'view-recipe') { pushModal({ type: 'recipeDetail', recipeId: button.dataset.recipeId }); render(); return; }
+      if (action === 'edit-recipe') { state.modal = { type: 'addRecipe', mode: 'edit', recipeId: button.dataset.recipeId }; render(); return; }
+      if (action === 'duplicate-recipe') { duplicateRecipeDraft(button.dataset.recipeId); return; }
+      if (action === 'delete-recipe') { await deleteRecipe(button.dataset.recipeId); return; }
+      if (action === 'plan-recipe') { state.modal = { type: 'chooseDay', recipeId: button.dataset.recipeId }; render(); return; }
+      if (action === 'choose-day-for-recipe') { await planRecipeOnDate(state.modal.recipeId, button.dataset.date, true); return; }
+      if (action === 'toggle-favorite') { await toggleFavorite(button.dataset.recipeId); return; }
+      if (action === 'build-grocery') { await buildGroceryList(); state.view = 'grocery'; resetModals(); render(); toast('Grocery list updated'); return; }
+      if (action === 'clear-checked') { await store.clearChecked(weekKey()); await reloadData(); render(); return; }
+      if (action === 'delete-grocery') { await store.deleteGrocery(button.dataset.id); await reloadData(); render(); return; }
+      if (action === 'toggle-grocery' && button.matches('input')) { await toggleGrocery(button.dataset.id, button.checked); return; }
+      if (action === 'recommend-week') { state.modal = { type: 'recommendWeek' }; render(); return; }
+      if (action === 'cook') { resetModals(); state.cook = { recipeId: button.dataset.recipeId, step: 0, finished: false }; render(); return; }
+      if (action === 'cook-prev') { state.cook.step = Math.max(0, state.cook.step - 1); render(); return; }
+      if (action === 'cook-next') {
+        const recipe = recipeById(state.cook.recipeId);
+        if (state.cook.step >= (recipe.steps || []).length - 1) state.cook.finished = true;
+        else state.cook.step += 1;
+        render(); return;
+      }
+      if (action === 'close-cook') { state.cook = null; render(); return; }
+      if (action === 'rate') { await rateRecipe(button.dataset.rating); return; }
+      if (action === 'reset-demo') { if (confirm('Reset Demo Mode and restore the starter recipes?')) { await store.reset(); state.weekStart = startOfWeek(new Date()); await reloadData(); render(); toast('Demo reset'); } return; }
+      if (action === 'signout') { if (realtimeChannel) { await sb.removeChannel(realtimeChannel); realtimeChannel = null; } await sb.auth.signOut(); state.user = null; state.authMessage = ''; state.authError = ''; renderAuth(); return; }
+      if (action === 'signup') { await authAction('signup'); return; }
+    } catch (error) {
+      console.error(error);
+      toast(error.message || 'Something went wrong');
+    }
+  }
+
+  function handleInput(event) {
+    if (event.target.id === 'recipe-search') {
+      state.recipeSearch = event.target.value;
+      const list = document.querySelector('.recipe-grid');
+      const head = document.querySelector('.list-head');
+      if (!list || !head) { render(); return; }
+      const recipes = filteredRecipes();
+      list.innerHTML = recipeListInner(recipes);
+      head.innerHTML = recipeHeadInner(recipes);
+      return;
+    }
+    if (event.target.id === 'plan-search') {
+      state.planSearch = event.target.value;
+      const list = document.querySelector('.pick-list');
+      const head = document.querySelector('.modal .list-head span');
+      if (!list) { render(); return; }
+      const picks = planPickList();
+      if (head) head.textContent = `${picks.length} ${picks.length === 1 ? 'recipe' : 'recipes'}`;
+      list.innerHTML = pickListInner(picks, state.modal?.mode || 'suggested');
+      return;
+    }
+    if (event.target.id === 'meal-note' && state.modal) {
+      state.modal.noteDraft = event.target.value;
+    }
+  }
+
+  async function handleChange(event) {
+    if (event.target.id !== 'recipekeeper-file') return;
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    try {
+      toast('Reading Recipe Keeper export…');
+      const parsed = await window.MealzRecipeKeeper.readExport(file);
+      const existingNames = new Set(state.recipes.map(r => String(r.name || '').trim().toLowerCase()));
+      const skipped = [];
+      const recipes = [];
+      for (const raw of parsed) {
+        const nameKey = String(raw.name || '').trim().toLowerCase();
+        if (!nameKey || existingNames.has(nameKey)) {
+          if (raw.name) skipped.push(raw.name);
+          continue;
+        }
+        existingNames.add(nameKey);
+        const dishType = raw.dish_type || dishTypeOf(raw);
+        recipes.push({ ...cleanRecipePayload(raw), tags: withDishTypeTag(raw.tags || [], dishType) });
+      }
+      state.modal = { type: 'recipeKeeperPreview', recipes, skipped };
+      render();
+    } catch (error) {
+      console.error(error);
+      toast(error.message || 'Mealz could not import that Recipe Keeper file.');
+    }
+  }
+
+  async function importRecipeKeeperConfirmed() {
+    const recipes = state.modal?.type === 'recipeKeeperPreview' ? (state.modal.recipes || []) : [];
+    if (!recipes.length) return;
+    const count = recipes.length;
+    resetModals();
+    render();
+    toast(`Importing ${count} recipes…`);
+    await store.saveRecipes(recipes);
+    await reloadData();
+    state.view = 'recipes';
+    state.recipeTypeFilter = 'All';
+    render();
+    toast(`${count} Recipe Keeper ${count === 1 ? 'recipe' : 'recipes'} imported`);
+  }
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    if (event.target.id === 'auth-form') { await authAction('signin'); return; }
+    if (event.target.id === 'grocery-form') {
+      const fd = new FormData(event.target);
+      await store.saveGrocery({
+        week_start: weekKey(), name: String(fd.get('name') || '').trim(), amount: '',
+        category: String(fd.get('category') || 'Other'), checked: false, manual: true
+      });
+      await reloadData(); render(); return;
+    }
+    if (event.target.id === 'recipe-import-form') { await importRecipeUrl(event.target); return; }
+    if (event.target.id === 'recipe-form') { await saveNewRecipe(event.target); return; }
+  }
+
+  async function authAction(kind) {
+    const form = document.getElementById('auth-form');
+    if (!form) return;
+    const fd = new FormData(form);
+    const email = String(fd.get('email') || '').trim();
+    const password = String(fd.get('password') || '');
+    if (!email || password.length < 6) {
+      state.authError = 'Enter an email and a password of at least 6 characters.';
+      state.authMessage = '';
+      renderAuth(); return;
+    }
+    state.authError = ''; state.authMessage = '';
+    if (kind === 'signup') {
+      const { data, error } = await sb.auth.signUp({ email, password });
+      if (error) { state.authError = error.message; renderAuth(); return; }
+      if (!data.session) {
+        state.authMessage = 'Account created. Check the email for a confirmation link, then sign in on both phones.';
+        renderAuth(); return;
+      }
+      await initializeShared(data.user);
+      return;
+    }
+    const { data, error } = await sb.auth.signInWithPassword({ email, password });
+    if (error) { state.authError = error.message; renderAuth(); return; }
+    await initializeShared(data.user);
+  }
+
+  async function setEatingOut() {
+    await store.upsertMeal({ meal_date: state.modal.date, type: 'eatout', recipe_id: null, label: 'Eating Out' });
+    await reloadData(); resetModals(); render(); toast('Eating out added');
+  }
+
+  async function selectPlanRecipe(recipeId, leftover) {
+    const date = state.modal.date;
+    state.modalStack = [];
+    await planRecipeOnDate(recipeId, date, !leftover, leftover);
+  }
+
+  async function planRecipeOnDate(recipeId, date, offerLeftovers = true, leftover = false) {
+    const recipe = recipeById(recipeId);
+    await store.upsertMeal({ meal_date: date, type: leftover ? 'leftover' : 'meal', recipe_id: recipeId, label: recipe?.name || '' });
+    await reloadData();
+    if (offerLeftovers && !leftover) state.modal = { type: 'leftoverPrompt', date, recipeId };
+    else resetModals();
+    render();
+  }
+
+  async function addLeftoverNext() {
+    const nextKey = dateKey(addDays(parseLocalDate(state.modal.date), 1));
+    if (mealForDate(nextKey)) { resetModals(); render(); return; }
+    const recipe = recipeById(state.modal.recipeId);
+    await store.upsertMeal({ meal_date: nextKey, type: 'leftover', recipe_id: state.modal.recipeId, label: recipe?.name || '' });
+    await reloadData(); resetModals(); render(); toast('Tomorrow set to leftovers');
+  }
+
+  async function addLeftoverAfter(dateKeyValue, recipeId) {
+    const nextKey = dateKey(addDays(parseLocalDate(dateKeyValue), 1));
+    if (mealForDate(nextKey)) { toast('That day already has a plan'); return; }
+    const recipe = recipeById(recipeId);
+    await store.upsertMeal({ meal_date: nextKey, type: 'leftover', recipe_id: recipeId, label: recipe?.name || '' });
+    await reloadData(); resetModals(); render(); toast('Tomorrow set to leftovers');
+  }
+
+  function currentNoteDraft() {
+    const field = document.getElementById('meal-note');
+    if (field) return field.value;
+    return String(state.modal?.noteDraft || '');
+  }
+
+  async function saveMealNote() {
+    const key = state.modal?.date;
+    const meal = key ? mealForDate(key) : null;
+    if (!meal) return;
+    const notes = currentNoteDraft().trim();
+    meal.notes = notes;
+    state.modal.noteDraft = notes;
+    render();
+    await store.upsertMeal({ ...meal, notes });
+    await reloadData();
+    render();
+    toast(notes ? 'Note saved' : 'Note cleared');
+  }
+
+  async function sendNoteToGrocery() {
+    const note = currentNoteDraft().trim();
+    if (!note) { toast('Write a note first'); return; }
+    await store.saveGrocery({
+      week_start: weekKey(), name: note, amount: '', category: 'Other', checked: false, manual: true
+    });
+    await reloadData();
+    render();
+    toast('Added to the grocery list');
+  }
+
+  async function toggleFavorite(recipeId) {
+    const recipe = recipeById(recipeId);
+    if (!recipe) return;
+    recipe.favorite = !recipe.favorite;
+    render();
+    await store.saveRecipe({ ...recipe });
+  }
+
+  async function importRecipeUrl(form) {
+    const fd = new FormData(form);
+    const url = String(fd.get('url') || '').trim();
+    if (!url) return;
+    state.modal = { type: 'addRecipe', mode: 'import', importing: true, url };
+    render();
+    try {
+      const response = await fetch('/api/import-recipe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url })
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.recipe) throw new Error(data.error || 'Mealz could not read a clean recipe from that page.');
+      state.modal = { type: 'addRecipe', mode: 'review', imported: data.recipe };
+      render();
+    } catch (error) {
+      const localHint = location.protocol === 'file:' ? ' URL import works after Mealz is deployed to Vercel.' : '';
+      state.modal = { type: 'addRecipe', mode: 'import', importing: false, url, error: `${error.message || 'Unable to import recipe.'}${localHint}` };
+      render();
+    }
+  }
+
+  async function saveNewRecipe(form) {
+    const fd = new FormData(form);
+    const ingredients = String(fd.get('ingredients') || '').split('\n').map(s => s.trim()).filter(Boolean).map(line => {
+      const [amount = '', name = '', category = 'Other'] = line.split('|').map(s => s.trim());
+      return { amount, name: name || amount, category: normalizeCategory(category) };
+    });
+    const steps = String(fd.get('steps') || '').split('\n').map(s => s.trim()).filter(Boolean);
+    const recipeId = String(fd.get('recipe_id') || '').trim();
+    const existing = recipeId ? recipeById(recipeId) : null;
+    const prep = clampNumber(fd.get('prep_minutes'), 0, 240);
+    const cook = clampNumber(fd.get('cook_minutes'), 0, 360);
+    const dishType = String(fd.get('dish_type') || '').trim() || dishTypeOf(existing || state.modal?.imported || {});
+    const retainedTags = existing?.tags || state.modal?.imported?.tags || [];
+    const recipe = {
+      ...(existing || {}),
+      ...(recipeId ? { id: recipeId } : {}),
+      name: String(fd.get('name') || '').trim(), cuisine: String(fd.get('cuisine') || '').trim(),
+      prep_minutes: prep, cook_minutes: cook,
+      difficulty: String(fd.get('difficulty') || 'Easy'),
+      favorite: existing?.favorite || false,
+      rating: existing?.rating || '',
+      is_new: existing ? existing.is_new : true,
+      tags: withDishTypeTag([...new Set([...retainedTags.filter(tag => !/^dish:/i.test(String(tag)) && !['lean protein', 'fresh vegetables', 'quick'].includes(String(tag).toLowerCase())), ...inferTags(String(fd.get('ingredients') || ''), prep, cook)])], dishType),
+      ingredients, steps, source_url: String(fd.get('source_url') || '').trim()
+    };
+    if (!recipe.name) return;
+    const saved = await store.saveRecipe(recipe);
+    await reloadData();
+    state.modal = { type: 'recipeDetail', recipeId: saved.id };
+    render();
+    toast(existing ? 'Recipe updated' : 'Recipe saved');
+  }
+
+  function duplicateRecipeDraft(recipeId) {
+    const recipe = recipeById(recipeId);
+    if (!recipe) return;
+    const copy = {
+      ...recipe,
+      id: undefined,
+      created_at: undefined,
+      name: `${recipe.name} Copy`,
+      favorite: false,
+      rating: '',
+      is_new: true,
+      ingredients: (recipe.ingredients || []).map(i => ({ ...i })),
+      steps: [...(recipe.steps || [])],
+      tags: [...(recipe.tags || [])]
+    };
+    state.modal = { type: 'addRecipe', mode: 'duplicate', imported: copy };
+    render();
+  }
+
+  function affectedWeekStarts(recipeId) {
+    return [...new Set(state.meals.filter(m => m.recipe_id === recipeId).map(m => dateKey(startOfWeek(parseLocalDate(m.meal_date)))) )];
+  }
+
+  async function deleteRecipe(recipeId) {
+    const recipe = recipeById(recipeId);
+    if (!recipe) return;
+    const plannedCount = state.meals.filter(m => m.recipe_id === recipeId).length;
+    const message = plannedCount
+      ? `Delete “${recipe.name}”? It is planned on ${plannedCount} calendar ${plannedCount === 1 ? 'day' : 'days'}, and those meal plans will also be removed.`
+      : `Delete “${recipe.name}”? This cannot be undone.`;
+    if (!confirm(message)) return;
+    const weeks = affectedWeekStarts(recipeId);
+    await store.deleteRecipe(recipeId);
+    await reloadData();
+    for (const weekStart of weeks) await buildGroceryListForWeek(weekStart);
+    resetModals();
+    render();
+    toast('Recipe deleted');
+  }
+
+  function inferTags(text, prep, cook) {
+    const tags = [];
+    const lower = text.toLowerCase();
+    if (/chicken|turkey|sirloin|fish/.test(lower)) tags.push('lean protein');
+    if (/pepper|tomato|cucumber|onion|broccoli|zucchini|cilantro|avocado/.test(lower)) tags.push('fresh vegetables');
+    if (prep <= 15 && prep + cook <= 35) tags.push('quick');
+    return tags;
+  }
+
+  function clampNumber(value, min, max) {
+    const n = Number(value);
+    return Math.max(min, Math.min(max, Number.isFinite(n) ? n : min));
+  }
+
+  function normalizeCategory(value) {
+    const allowed = ['Produce', 'Meat', 'Dairy', 'Bakery', 'Pantry', 'Frozen', 'Other'];
+    const match = allowed.find(c => c.toLowerCase() === String(value).toLowerCase());
+    return match || 'Other';
+  }
+
+  async function buildGroceryList() {
+    await buildGroceryListForWeek(weekKey());
+  }
+
+  async function buildGroceryListForWeek(start) {
+    const weekStartDate = parseLocalDate(start);
+    const end = dateKey(addDays(weekStartDate, 6));
+    const weekMeals = state.meals.filter(m => m.meal_date >= start && m.meal_date <= end && m.type === 'meal' && m.recipe_id);
+    const uniqueRecipeIds = [...new Set(weekMeals.map(m => m.recipe_id))];
+    const existing = state.groceries.filter(g => g.week_start === start);
+    const checkedByName = new Map(existing.map(i => [String(i.name).toLowerCase(), i.checked]));
+    const map = new Map();
+
+    uniqueRecipeIds.forEach(id => {
+      const recipe = recipeById(id);
+      (recipe?.ingredients || []).forEach(ingredient => {
+        const name = String(ingredient.name || '').trim();
+        if (!name) return;
+        const key = name.toLowerCase();
+        const amount = String(ingredient.amount || '').trim();
+        if (!map.has(key)) map.set(key, { name, amount, category: normalizeCategory(ingredient.category), amounts: [] });
+        if (amount) map.get(key).amounts.push(amount);
+      });
+    });
+
+    const generated = [...map.values()].map(item => ({
+      week_start: start,
+      name: item.name,
+      amount: item.amounts.join(' + '),
+      category: item.category,
+      checked: checkedByName.get(item.name.toLowerCase()) || false,
+      manual: false
+    }));
+    await store.replaceAutoGroceries(start, generated);
+    await reloadData();
+  }
+
+  async function toggleGrocery(id, checked) {
+    const item = state.groceries.find(g => g.id === id);
+    if (!item) return;
+    item.checked = checked;
+    render();
+    await store.saveGrocery({ ...item, checked });
+  }
+
+  async function clearAllGroceries() {
+    const items = currentWeekGroceries();
+    if (!items.length) return;
+    if (!confirm(`Clear all ${items.length} items from this week's grocery list? This cannot be undone.`)) return;
+    await store.clearWeek(weekKey());
+    await reloadData();
+    render();
+    toast('Grocery list cleared');
+  }
+
+  async function rateRecipe(rating) {
+    const recipe = recipeById(state.cook.recipeId);
+    if (recipe) await store.saveRecipe({ ...recipe, rating, is_new: false });
+    await reloadData(); state.cook = null; render(); toast('Saved — recommendations will learn from that');
+  }
+
+  function toast(message) {
+    document.querySelector('.toast')?.remove();
+    const el = document.createElement('div');
+    el.className = 'toast'; el.textContent = message;
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 2200);
+  }
+
+  start().catch(error => {
+    console.error(error);
+    root.innerHTML = `<main class="auth-shell"><section class="auth-card"><h1>Mealz</h1><div class="error-box">${escapeHtml(error.message || 'Unable to start Mealz.')}</div></section></main>`;
+  });
+})();
