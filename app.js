@@ -25,6 +25,10 @@
     modal: null,
     recipeSearch: '',
     recipeTypeFilter: 'All',
+    recipeFavoritesOnly: false,
+    planSearch: '',
+    planTypeFilter: 'All',
+    hideChecked: false,
     cook: null,
     authMessage: '',
     authError: '',
@@ -54,6 +58,16 @@
       ingredients: Array.isArray(recipe.ingredients) ? recipe.ingredients : [],
       steps: Array.isArray(recipe.steps) ? recipe.steps : [],
       source_url: String(recipe.source_url || '').trim()
+    };
+  }
+
+  function cleanMealPayload(meal = {}) {
+    return {
+      meal_date: meal.meal_date,
+      type: meal.type,
+      recipe_id: meal.recipe_id || null,
+      label: String(meal.label || ''),
+      notes: String(meal.notes || '')
     };
   }
 
@@ -380,7 +394,7 @@
       if (error) throw error;
     }
     async upsertMeal(meal) {
-      const payload = { ...meal, user_id: this.user.id };
+      const payload = { ...cleanMealPayload(meal), user_id: this.user.id };
       delete payload.id;
       const { data, error } = await this.client.from('weekly_meals')
         .upsert(payload, { onConflict: 'user_id,meal_date' }).select().single();
@@ -515,7 +529,47 @@
       </main>`;
   }
 
+  function captureViewState() {
+    const active = document.activeElement;
+    const snapshot = {
+      pageScroll: window.scrollY,
+      modalScroll: document.querySelector('.modal')?.scrollTop || 0,
+      chipScrolls: [...document.querySelectorAll('.chip-row')].map(el => el.scrollLeft),
+      focusId: active && active.id ? active.id : '',
+      selectionStart: null,
+      selectionEnd: null
+    };
+    if (snapshot.focusId && typeof active.selectionStart === 'number') {
+      snapshot.selectionStart = active.selectionStart;
+      snapshot.selectionEnd = active.selectionEnd;
+    }
+    return snapshot;
+  }
+
+  function restoreViewState(snapshot) {
+    if (!snapshot) return;
+    const modal = document.querySelector('.modal');
+    if (modal && snapshot.modalScroll) modal.scrollTop = snapshot.modalScroll;
+    [...document.querySelectorAll('.chip-row')].forEach((el, index) => {
+      if (snapshot.chipScrolls[index]) el.scrollLeft = snapshot.chipScrolls[index];
+    });
+    if (snapshot.pageScroll) window.scrollTo(0, snapshot.pageScroll);
+    if (!snapshot.focusId) return;
+    const field = document.getElementById(snapshot.focusId);
+    if (!field) return;
+    field.focus({ preventScroll: true });
+    if (snapshot.selectionStart != null && typeof field.setSelectionRange === 'function') {
+      try { field.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd); } catch { /* ignore */ }
+    }
+  }
+
   function render() {
+    const snapshot = captureViewState();
+    renderNow();
+    restoreViewState(snapshot);
+  }
+
+  function renderNow() {
     if (state.loading) {
       root.innerHTML = `<main class="auth-shell"><div class="auth-card"><strong>Loading Mealz…</strong></div></main>`;
       return;
@@ -626,28 +680,16 @@
 
   function renderWeek() {
     const today = new Date();
-    const todayKey = dateKey(today);
-    const tonightMeal = mealForDate(todayKey);
-    const tonight = mealDisplay(tonightMeal);
-    const tonightRecipe = tonightMeal?.recipe_id ? recipeById(tonightMeal.recipe_id) : null;
     const days = Array.from({ length: 7 }, (_, i) => addDays(state.weekStart, i));
 
-    const todayCard = tonightMeal
-      ? `<section class="today-card">
-          <div><div class="today-kicker">Tonight</div><div class="today-name">${escapeHtml(tonight.name)}</div><div class="today-meta">${escapeHtml(tonight.meta)}</div></div>
-          ${tonightRecipe ? `<button type="button" class="btn btn-light" data-action="cook" data-recipe-id="${tonightRecipe.id}">COOK DINNER</button>` : `<button type="button" class="btn btn-light" data-action="plan-date" data-date="${todayKey}">CHANGE PLAN</button>`}
-        </section>`
-      : `<section class="today-card">
-          <div><div class="today-kicker">Tonight</div><div class="today-name">Nothing planned yet</div><div class="today-meta">Pick something easy and get it off your mind.</div></div>
-          <button type="button" class="btn btn-light" data-action="plan-date" data-date="${todayKey}">PLAN TONIGHT</button>
-        </section>`;
-
     return `
-      ${todayCard}
-      <section class="week-panel week-hero">
-        <div class="week-toolbar week-hero-toolbar">
-          <div class="week-hero-title"><div class="week-kicker">Plan Ahead</div><div class="week-title-big">${weekTitle()}</div><div class="week-range">${formatWeekRange(state.weekStart)}</div></div>
+      <section class="week-panel">
+        <div class="week-head">
+          <div><div class="week-kicker">Dinner Plan</div><div class="week-title-big">${weekTitle()}</div><div class="week-range">${formatWeekRange(state.weekStart)}</div></div>
           <div class="week-nav-buttons"><button type="button" class="icon-btn" data-action="previous-week" aria-label="Previous week">‹</button><button type="button" class="icon-btn" data-action="next-week" aria-label="Next week">›</button></div>
+        </div>
+        <div class="week-list">
+          ${days.map(day => renderDay(day, sameDay(day, today))).join('')}
         </div>
         <div class="legend" aria-label="Calendar color key">
           <span class="legend-item"><i class="legend-dot dot-meal"></i> Planned</span>
@@ -656,13 +698,10 @@
           <span class="legend-item"><i class="legend-dot dot-new"></i> New</span>
           <span class="legend-item"><i class="legend-dot dot-open"></i> Open</span>
         </div>
-        <div class="week-grid">
-          ${days.map(day => renderDay(day, sameDay(day, today))).join('')}
-        </div>
       </section>
-      <section class="quick-row">
-        <button type="button" class="action-card" data-action="build-grocery"><strong>🛒 Build Grocery List</strong><span>Pull ingredients from this week's planned meals.</span></button>
-        <button type="button" class="action-card" data-action="recommend-week"><strong>✨ Help Me Pick</strong><span>Show quick, healthy meals that fit how you actually cook.</span></button>
+      <section class="tile-grid">
+        <button type="button" class="tile" data-action="build-grocery"><span class="tile-icon">🛒</span><strong>Grocery List</strong><span>Build from this week</span></button>
+        <button type="button" class="tile" data-action="recommend-week"><span class="tile-icon">✨</span><strong>Help Me Pick</strong><span>Suggestions for the week</span></button>
       </section>`;
   }
 
@@ -672,64 +711,104 @@
     const recipe = meal?.recipe_id ? recipeById(meal.recipe_id) : null;
     const display = mealDisplay(meal);
     const type = mealClass(meal, recipe);
-    return `<article class="day-card ${isToday ? 'today' : ''}">
-      <div class="day-head"><span class="day-name">${day.toLocaleDateString(undefined, { weekday: 'short' })}</span><span class="day-date">${day.getDate()}</span></div>
+    const note = String(meal?.notes || '').trim();
+    return `<article class="day-row ${isToday ? 'today' : ''}">
+      <div class="day-date-col"><span class="day-name">${day.toLocaleDateString(undefined, { weekday: 'short' })}</span><span class="day-date">${day.getDate()}</span></div>
       ${meal
-        ? `<div class="day-meal type-${type}"><div class="meal-name">${escapeHtml(display.name)}</div><div class="meal-meta">${escapeHtml(display.meta)}</div>${recipe?.is_new && meal.type === 'meal' ? '<div class="meal-meta">✨ New recipe</div>' : ''}</div>
-           <button type="button" class="edit-link" data-action="plan-date" data-date="${key}">Change</button>`
-        : `<div class="day-empty">Open</div><button type="button" class="plan-button" data-action="plan-date" data-date="${key}">+ Plan</button>`}
+        ? `<button type="button" class="day-meal-btn type-${type}" data-action="open-meal" data-date="${key}">
+             <span class="meal-name">${escapeHtml(display.name)}</span>
+             <span class="meal-meta">${escapeHtml(display.meta)}</span>
+             ${note ? `<span class="meal-note-flag">📝 ${escapeHtml(note.length > 46 ? `${note.slice(0, 46)}…` : note)}</span>` : ''}
+           </button>`
+        : `<button type="button" class="day-plan-btn" data-action="plan-date" data-date="${key}">+ Plan dinner</button>`}
     </article>`;
   }
 
-  function renderRecipes() {
-    const q = state.recipeSearch.trim().toLowerCase();
-    const allTypes = [...new Set(state.recipes.map(dishTypeOf).filter(Boolean))].sort((a, b) => a.localeCompare(b));
-    if (state.recipeTypeFilter !== 'All' && !allTypes.includes(state.recipeTypeFilter)) state.recipeTypeFilter = 'All';
-    const searched = state.recipes.filter(r => !q || [r.name, r.cuisine, dishTypeOf(r), ...visibleRecipeTags(r)].join(' ').toLowerCase().includes(q));
-    const recipes = searched.filter(r => state.recipeTypeFilter === 'All' || dishTypeOf(r) === state.recipeTypeFilter);
-    const grouped = new Map();
-    recipes.forEach(recipe => {
-      const type = dishTypeOf(recipe);
-      if (!grouped.has(type)) grouped.set(type, []);
-      grouped.get(type).push(recipe);
-    });
-    grouped.forEach(list => list.sort((a, b) => Number(b.favorite) - Number(a.favorite) || a.name.localeCompare(b.name)));
-    const typeOrder = [...grouped.keys()].sort((a, b) => {
+  const DISH_ICONS = {
+    Chicken: '🍗', Beef: '🥩', Pork: '🥓', Turkey: '🦃', Seafood: '🐟', Lamb: '🐑',
+    Vegetarian: '🥦', Pasta: '🍝', Soup: '🥣', Other: '🍽'
+  };
+
+  function dishIcon(recipe) {
+    return DISH_ICONS[dishTypeOf(recipe)] || '🍽';
+  }
+
+  function matchesSearch(recipe, query) {
+    if (!query) return true;
+    return [recipe.name, recipe.cuisine, dishTypeOf(recipe), ...visibleRecipeTags(recipe)]
+      .join(' ').toLowerCase().includes(query);
+  }
+
+  function sortByName(list) {
+    return [...list].sort((a, b) => Number(b.favorite) - Number(a.favorite) || String(a.name).localeCompare(String(b.name)));
+  }
+
+  function dishTypesInUse() {
+    return [...new Set(state.recipes.map(dishTypeOf).filter(Boolean))].sort((a, b) => {
       const ia = DEFAULT_DISH_TYPES.indexOf(a), ib = DEFAULT_DISH_TYPES.indexOf(b);
       if (ia >= 0 || ib >= 0) return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
       return a.localeCompare(b);
     });
+  }
+
+  function filteredRecipes() {
+    const q = state.recipeSearch.trim().toLowerCase();
+    return sortByName(state.recipes.filter(r =>
+      matchesSearch(r, q)
+      && (state.recipeTypeFilter === 'All' || dishTypeOf(r) === state.recipeTypeFilter)
+      && (!state.recipeFavoritesOnly || r.favorite)
+    ));
+  }
+
+  function recipeListInner(recipes) {
+    return recipes.length
+      ? recipes.map(renderRecipeRow).join('')
+      : '<div class="panel empty-state"><strong>No recipes found.</strong>Try another search or clear the filters.</div>';
+  }
+
+  function recipeHeadInner(recipes) {
+    const label = state.recipeFavoritesOnly ? 'Favorites' : state.recipeTypeFilter === 'All' ? 'All recipes' : state.recipeTypeFilter;
+    return `<h3>${escapeHtml(label)}</h3><span>${recipes.length} ${recipes.length === 1 ? 'recipe' : 'recipes'}</span>`;
+  }
+
+  function renderRecipes() {
+    const allTypes = dishTypesInUse();
+    if (state.recipeTypeFilter !== 'All' && !allTypes.includes(state.recipeTypeFilter)) state.recipeTypeFilter = 'All';
+    const recipes = filteredRecipes();
 
     return `
-      <section class="panel recipe-library-head">
-        <div class="toolbar">
-          <div><h2 class="section-title">Recipes</h2><p class="section-subtitle">Organized by dish type so you can find dinner fast.</p></div>
-          <div class="recipe-toolbar-actions">
-            <button type="button" class="btn btn-primary" data-action="add-recipe">+ Add Recipe</button>
-            <label class="btn btn-outline recipekeeper-file-label" for="recipekeeper-file">⇩ Import Recipe Keeper<input id="recipekeeper-file" class="visually-hidden-file" type="file" accept=".zip,.html,.htm,text/html,application/zip" /></label>
+      <section>
+        <div class="sticky-head">
+          <div class="search-row">
+            <input id="recipe-search" class="search-input" type="search" placeholder="Search recipes, cuisine, dish type" value="${escapeHtml(state.recipeSearch)}" />
+          </div>
+          <div class="chip-row" aria-label="Filter recipes">
+            <button type="button" class="chip ${state.recipeFavoritesOnly ? 'active' : ''}" data-action="recipe-favorites">❤️ Favorites</button>
+            ${['All', ...allTypes].map(type => `<button type="button" class="chip ${state.recipeTypeFilter === type ? 'active' : ''}" data-action="recipe-type" data-type="${escapeHtml(type)}">${escapeHtml(type)}</button>`).join('')}
           </div>
         </div>
-        <div class="toolbar" style="margin-top:14px"><div class="search-wrap"><input id="recipe-search" class="search-input" type="search" placeholder="Search recipes, cuisine, or dish type" value="${escapeHtml(state.recipeSearch)}" /></div></div>
-        <div class="dish-filter" aria-label="Filter recipes by dish type">
-          ${['All', ...allTypes].map(type => `<button type="button" class="dish-filter-btn ${state.recipeTypeFilter === type ? 'active' : ''}" data-action="recipe-type" data-type="${escapeHtml(type)}">${escapeHtml(type)}</button>`).join('')}
-        </div>
+        <div class="list-head">${recipeHeadInner(recipes)}</div>
+        <div class="recipe-list">${recipeListInner(recipes)}</div>
       </section>
-      ${typeOrder.length ? typeOrder.map(type => renderRecipeGroup(type, grouped.get(type))).join('') : '<section class="panel empty-state"><strong>No recipes found.</strong>Try another search or add one.</section>'}`;
+      <section class="tile-grid">
+        <button type="button" class="tile" data-action="add-recipe"><span class="tile-icon">＋</span><strong>Add Recipe</strong><span>Link or manual entry</span></button>
+        <label class="tile recipekeeper-file-label" for="recipekeeper-file"><span class="tile-icon">⇩</span><strong>Import</strong><span>Recipe Keeper export</span><input id="recipekeeper-file" class="visually-hidden-file" type="file" accept=".zip,.html,.htm,text/html,application/zip" /></label>
+      </section>`;
   }
 
-  function renderRecipeGroup(type, recipes) {
-    return `<section class="recipe-group"><div class="recipe-group-head"><h3>${escapeHtml(type)}</h3><span>${recipes.length} ${recipes.length === 1 ? 'recipe' : 'recipes'}</span></div><div class="recipe-grid">${recipes.map(renderRecipeCard).join('')}</div></section>`;
-  }
-
-  function renderRecipeCard(recipe) {
+  function renderRecipeRow(recipe) {
     const total = Number(recipe.prep_minutes || 0) + Number(recipe.cook_minutes || 0);
-    const tags = visibleRecipeTags(recipe).slice(0, 3);
-    return `<article class="recipe-card">
-      <div class="recipe-card-top"><div><div class="recipe-name">${escapeHtml(recipe.name)}</div><div class="recipe-meta">${escapeHtml(recipe.cuisine || 'Dinner')} · ${total} min · ${escapeHtml(recipe.difficulty || 'Easy')}</div></div>
-      <button type="button" class="favorite-btn" data-action="toggle-favorite" data-recipe-id="${recipe.id}" aria-label="Toggle favorite">${recipe.favorite ? '❤️' : '♡'}</button></div>
-      <div class="recipe-tags"><span class="tag protein-tag">${escapeHtml(dishTypeOf(recipe))}</span>${tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}${recipe.is_new ? '<span class="tag">✨ New</span>' : ''}</div>
-      <div class="recipe-actions"><button type="button" class="btn btn-outline btn-small" data-action="view-recipe" data-recipe-id="${recipe.id}">View</button><button type="button" class="btn btn-primary btn-small" data-action="plan-recipe" data-recipe-id="${recipe.id}">Plan</button></div>
-    </article>`;
+    const meta = [dishTypeOf(recipe), `${total || '?'} min`, recipe.cuisine].filter(Boolean).join(' · ');
+    return `<div class="recipe-row">
+      <button type="button" class="recipe-row-main" data-action="view-recipe" data-recipe-id="${recipe.id}">
+        <span class="dish-tile">${dishIcon(recipe)}</span>
+        <span class="recipe-row-text">
+          <span class="recipe-row-name">${escapeHtml(recipe.name)}</span>
+          <span class="recipe-row-meta">${escapeHtml(meta)}${recipe.is_new ? ' · ✨ New' : ''}</span>
+        </span>
+      </button>
+      <button type="button" class="fav-btn" data-action="toggle-favorite" data-recipe-id="${recipe.id}" aria-label="Toggle favorite">${recipe.favorite ? '❤️' : '♡'}</button>
+    </div>`;
   }
 
   function currentWeekGroceries() {
@@ -738,20 +817,27 @@
 
   function renderGrocery() {
     const items = currentWeekGroceries();
+    const remaining = items.filter(i => !i.checked).length;
+    const visible = state.hideChecked ? items.filter(i => !i.checked) : items;
     const categories = ['Produce', 'Meat', 'Dairy', 'Bakery', 'Pantry', 'Frozen', 'Other'];
     return `<section class="panel">
       <div class="grocery-head">
-        <div><h2 class="section-title">Grocery List</h2><p class="section-subtitle">${formatWeekRange(state.weekStart)} · shared and editable</p></div>
-        <div class="week-actions"><button type="button" class="btn btn-outline btn-small" data-action="build-grocery">Rebuild from Meals</button>${items.some(i => i.checked) ? '<button type="button" class="btn btn-small" data-action="clear-checked">Clear Checked</button>' : ''}</div>
+        <div><h2 class="section-title">Grocery List</h2><p class="section-subtitle">${formatWeekRange(state.weekStart)}</p></div>
+        <div class="count-line">${items.length ? `${remaining} of ${items.length} still to get` : 'Nothing on the list yet'}</div>
       </div>
       <form id="grocery-form" class="grocery-add">
         <input class="text-input" name="name" placeholder="Add milk, fruit, snacks…" required />
         <select class="select-input" name="category">${categories.map(c => `<option>${c}</option>`).join('')}</select>
         <button class="btn btn-primary" type="submit">Add</button>
       </form>
+      <div class="chip-row">
+        <button type="button" class="chip ${state.hideChecked ? 'active' : ''}" data-action="toggle-hide-checked">${state.hideChecked ? 'Showing unchecked' : 'Hide checked'}</button>
+        <button type="button" class="chip" data-action="build-grocery">Rebuild from meals</button>
+        ${items.some(i => i.checked) ? '<button type="button" class="chip" data-action="clear-checked">Clear checked</button>' : ''}
+      </div>
     </section>
     <section class="panel">
-      ${items.length ? categories.map(cat => renderGroceryCategory(cat, items.filter(i => (i.category || 'Other') === cat))).join('') : '<div class="empty-state"><strong>Your list is empty.</strong>Plan meals, then tap “Build Grocery List.” You can also add anything manually.</div>'}
+      ${visible.length ? categories.map(cat => renderGroceryCategory(cat, visible.filter(i => (i.category || 'Other') === cat))).join('') : '<div class="empty-state"><strong>Nothing to show.</strong>Plan meals, then tap Grocery List on the plan screen. You can also add anything manually.</div>'}
     </section>`;
   }
 
@@ -782,6 +868,7 @@
 
   function renderModal() {
     if (state.modal.type === 'plan') return renderPlanModal();
+    if (state.modal.type === 'mealNight') return renderMealNightSheet();
     if (state.modal.type === 'leftoverPrompt') return renderLeftoverPrompt();
     if (state.modal.type === 'recipeDetail') return renderRecipeDetailModal();
     if (state.modal.type === 'addRecipe') return renderAddRecipeModal();
@@ -813,41 +900,118 @@
     return modalShell('Import Recipe Keeper', 'One bulk import instead of retyping your collection.', body);
   }
 
+  function leftoverCandidates(key) {
+    const earlier = state.meals
+      .filter(m => m.type === 'meal' && m.meal_date < key && m.meal_date >= weekKey() && m.recipe_id)
+      .map(m => recipeById(m.recipe_id)).filter(Boolean);
+    return [...new Map(earlier.map(r => [r.id, r])).values()].reverse();
+  }
+
+  function planPickList() {
+    const key = state.modal.date;
+    const mode = state.modal.mode || 'suggested';
+    const q = state.planSearch.trim().toLowerCase();
+    let list = [];
+    if (mode === 'leftover') list = leftoverCandidates(key);
+    else if (mode === 'favorite') list = sortByName(state.recipes.filter(r => r.favorite));
+    else if (mode === 'all') list = sortByName(state.recipes);
+    else list = getRecommendations();
+
+    list = list.filter(r => matchesSearch(r, q) && (state.planTypeFilter === 'All' || dishTypeOf(r) === state.planTypeFilter));
+    if (mode === 'suggested' && !q && state.planTypeFilter === 'All') list = list.slice(0, 12);
+    return list;
+  }
+
+  function pickListInner(list, mode) {
+    return list.length
+      ? list.map(r => renderPlanRecipeRow(r, mode === 'leftover')).join('')
+      : '<div class="panel empty-state"><strong>Nothing matches.</strong>Try another search or switch filters.</div>';
+  }
+
   function renderPlanModal() {
     const key = state.modal.date;
     const date = parseLocalDate(key);
     const current = mealForDate(key);
-    const mode = state.modal.mode || 'recommend';
-    let list = [];
-    let listHtml = '';
-    if (mode === 'favorite') list = state.recipes.filter(r => r.favorite);
-    if (mode === 'all') list = [...state.recipes].sort((a, b) => a.name.localeCompare(b.name));
-    if (mode === 'recommend') list = getRecommendations();
-    if (mode === 'leftover') {
-      const earlier = state.meals
-        .filter(m => m.type === 'meal' && m.meal_date < key && m.meal_date >= weekKey() && m.recipe_id)
-        .map(m => recipeById(m.recipe_id)).filter(Boolean);
-      list = [...new Map(earlier.map(r => [r.id, r])).values()].reverse();
-    }
-    if (['favorite', 'all', 'recommend', 'leftover'].includes(mode)) {
-      listHtml = `<div class="recommend-list">${list.length ? list.map(r => renderPlanRecipeRow(r, mode === 'leftover')).join('') : '<div class="empty-state"><strong>Nothing here yet.</strong>Choose another option.</div>'}</div>`;
-    }
+    const mode = state.modal.mode || 'suggested';
+    const allTypes = dishTypesInUse();
+    if (state.planTypeFilter !== 'All' && !allTypes.includes(state.planTypeFilter)) state.planTypeFilter = 'All';
+
+    const list = planPickList();
+    const modes = [['suggested', 'Suggested'], ['favorite', '❤️ Favorites'], ['all', 'All'], ['leftover', '🟡 Leftovers']];
+
     const body = `
-      <div class="choice-grid">
-        <button type="button" class="choice-btn" data-action="plan-mode" data-mode="recommend"><strong>✨ Recommend</strong><span>Quick, healthy meals that fit your style.</span></button>
-        <button type="button" class="choice-btn" data-action="plan-mode" data-mode="favorite"><strong>❤️ Favorites</strong><span>Meals you already trust.</span></button>
-        <button type="button" class="choice-btn" data-action="plan-mode" data-mode="all"><strong>🍽 All Recipes</strong><span>Pick anything in your recipe keeper.</span></button>
-        <button type="button" class="choice-btn" data-action="plan-mode" data-mode="leftover"><strong>🟡 Leftovers</strong><span>Use a meal already planned earlier this week.</span></button>
-        <button type="button" class="choice-btn" data-action="set-eatout"><strong>🥡 Eating Out</strong><span>Mark the night handled.</span></button>
-        ${current ? '<button type="button" class="choice-btn" data-action="clear-day"><strong>× Clear Day</strong><span>Remove the current plan.</span></button>' : '<button type="button" class="choice-btn" data-action="add-recipe"><strong>＋ Add Recipe</strong><span>Save something new first.</span></button>'}
-      </div>${listHtml}`;
+      <div class="sticky-head">
+        <div class="search-row">
+          <input id="plan-search" class="search-input" type="search" placeholder="Search your recipes" value="${escapeHtml(state.planSearch)}" />
+        </div>
+        <div class="chip-row" aria-label="Recipe source">
+          ${modes.map(([value, label]) => `<button type="button" class="chip ${mode === value ? 'active' : ''}" data-action="plan-mode" data-mode="${value}">${label}</button>`).join('')}
+        </div>
+        <div class="chip-row" aria-label="Filter by dish type">
+          ${['All', ...allTypes].map(type => `<button type="button" class="chip ${state.planTypeFilter === type ? 'active' : ''}" data-action="plan-type" data-type="${escapeHtml(type)}">${escapeHtml(type)}</button>`).join('')}
+        </div>
+      </div>
+      <div class="pick-list">${pickListInner(list, mode)}</div>
+      <div class="sheet-section">
+        <h3>Other options</h3>
+        <div class="tile-grid tile-grid-3">
+          <button type="button" class="tile" data-action="set-eatout"><span class="tile-icon">🥡</span><strong>Eating Out</strong></button>
+          <button type="button" class="tile" data-action="add-recipe"><span class="tile-icon">＋</span><strong>New Recipe</strong></button>
+          ${current
+            ? '<button type="button" class="tile tile-danger" data-action="clear-day"><span class="tile-icon">×</span><strong>Clear Day</strong></button>'
+            : '<button type="button" class="tile" data-action="close-modal"><span class="tile-icon">↩</span><strong>Cancel</strong></button>'}
+        </div>
+      </div>`;
     return modalShell(`Plan ${date.toLocaleDateString(undefined, { weekday: 'long' })}`, date.toLocaleDateString(undefined, { month: 'long', day: 'numeric' }), body);
   }
 
   function renderPlanRecipeRow(recipe, leftover = false) {
     const total = Number(recipe.prep_minutes || 0) + Number(recipe.cook_minutes || 0);
-    const reason = leftover ? 'Already planned this week' : recommendationReason(recipe);
-    return `<div class="recommend-row"><div><strong>${escapeHtml(recipe.name)}</strong><small>${escapeHtml(reason)} · ${total} min</small></div><button type="button" class="btn btn-primary btn-small" data-action="select-plan-recipe" data-recipe-id="${recipe.id}" data-leftover="${leftover ? 'true' : 'false'}">${leftover ? 'Use' : 'Pick'}</button></div>`;
+    const reason = leftover ? 'Planned earlier this week' : `${dishTypeOf(recipe)} · ${total || '?'} min`;
+    return `<button type="button" class="pick-row" data-action="select-plan-recipe" data-recipe-id="${recipe.id}" data-leftover="${leftover ? 'true' : 'false'}">
+      <span><strong>${escapeHtml(recipe.name)}</strong><small>${escapeHtml(reason)}${recipe.favorite ? ' · ❤️' : ''}</small></span>
+      <span class="pick-go">${leftover ? 'Use' : 'Pick'}</span>
+    </button>`;
+  }
+
+  function renderMealNightSheet() {
+    const key = state.modal.date;
+    const date = parseLocalDate(key);
+    const meal = mealForDate(key);
+    if (!meal) return '';
+    const recipe = meal.recipe_id ? recipeById(meal.recipe_id) : null;
+    const display = mealDisplay(meal);
+    const type = mealClass(meal, recipe);
+    const noteValue = state.modal.noteDraft != null ? state.modal.noteDraft : String(meal.notes || '');
+    const nextKey = dateKey(addDays(date, 1));
+    const nextTaken = Boolean(mealForDate(nextKey));
+
+    const body = `
+      <div class="meal-hero type-${type}">
+        <strong>${escapeHtml(display.name)}</strong>
+        <span>${escapeHtml(display.meta)}</span>
+      </div>
+      <div class="sheet-section">
+        <h3>Notes for this night</h3>
+        <div class="note-block">
+          <textarea id="meal-note" class="textarea-input" placeholder="Potatoes as a side. Red and yellow bell peppers. Start it early.">${escapeHtml(noteValue)}</textarea>
+          <div class="note-actions">
+            <button type="button" class="btn btn-primary" data-action="save-note">Save Note</button>
+            <button type="button" class="btn btn-outline" data-action="note-to-grocery">Send to Grocery</button>
+          </div>
+        </div>
+      </div>
+      <div class="sheet-section">
+        <h3>Actions</h3>
+        <div class="tile-grid tile-grid-3">
+          ${recipe ? `<button type="button" class="tile" data-action="view-recipe" data-recipe-id="${recipe.id}"><span class="tile-icon">📖</span><strong>Recipe</strong></button>` : ''}
+          ${recipe ? `<button type="button" class="tile" data-action="cook" data-recipe-id="${recipe.id}"><span class="tile-icon">👨‍🍳</span><strong>Cook</strong></button>` : ''}
+          <button type="button" class="tile" data-action="plan-date" data-date="${key}"><span class="tile-icon">🔄</span><strong>Swap</strong></button>
+          ${recipe && meal.type === 'meal' ? `<button type="button" class="tile" data-action="leftovers-tomorrow" data-date="${key}" data-recipe-id="${recipe.id}" ${nextTaken ? 'disabled' : ''}><span class="tile-icon">🟡</span><strong>Leftovers</strong></button>` : ''}
+          <button type="button" class="tile tile-danger" data-action="clear-day"><span class="tile-icon">×</span><strong>Clear</strong></button>
+        </div>
+      </div>`;
+    return modalShell(date.toLocaleDateString(undefined, { weekday: 'long' }), date.toLocaleDateString(undefined, { month: 'long', day: 'numeric' }), body);
   }
 
   function renderLeftoverPrompt() {
@@ -855,8 +1019,8 @@
     const next = addDays(parseLocalDate(state.modal.date), 1);
     const nextKey = dateKey(next);
     const nextMeal = mealForDate(nextKey);
-    const body = `<div class="panel" style="background:white"><p style="margin-top:0">Make enough <strong>${escapeHtml(recipe?.name || 'food')}</strong> for tomorrow too?</p>
-      <div class="choice-grid"><button type="button" class="choice-btn" data-action="add-leftover-next" ${nextMeal ? 'disabled' : ''}><strong>🟡 Yes — ${next.toLocaleDateString(undefined, { weekday: 'long' })}</strong><span>${nextMeal ? 'That day already has a plan.' : 'One tap and tomorrow becomes leftovers.'}</span></button><button type="button" class="choice-btn" data-action="close-modal"><strong>No Thanks</strong><span>Keep only the meal you just planned.</span></button></div></div>`;
+    const body = `<div class="panel"><p style="margin-top:0">Make enough <strong>${escapeHtml(recipe?.name || 'food')}</strong> for tomorrow too?</p>
+      <div class="tile-grid"><button type="button" class="tile" data-action="add-leftover-next" ${nextMeal ? 'disabled' : ''}><span class="tile-icon">🟡</span><strong>Yes, ${next.toLocaleDateString(undefined, { weekday: 'long' })}</strong><span>${nextMeal ? 'That day already has a plan.' : 'Tomorrow becomes leftovers.'}</span></button><button type="button" class="tile" data-action="close-modal"><span class="tile-icon">↩</span><strong>No Thanks</strong><span>Just this one night.</span></button></div></div>`;
     return modalShell('Plan leftovers?', 'This is the easiest way to stretch one dinner into two nights.', body);
   }
 
@@ -864,14 +1028,25 @@
     const recipe = recipeById(state.modal.recipeId);
     if (!recipe) return '';
     const total = Number(recipe.prep_minutes || 0) + Number(recipe.cook_minutes || 0);
-    const body = `<div class="recipe-detail panel" style="background:white">
-      <div class="recipe-meta"><strong>${escapeHtml(dishTypeOf(recipe))}</strong> · ${escapeHtml(recipe.cuisine || 'Dinner')} · ${total} min · ${escapeHtml(recipe.difficulty || 'Easy')}</div>
-      <h3>Ingredients</h3><ul class="ingredient-list">${(recipe.ingredients || []).map(i => `<li>${escapeHtml(i.amount || '')} ${escapeHtml(i.name || '')}</li>`).join('')}</ul>
-      <h3>Directions</h3><ol class="step-list">${(recipe.steps || []).map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ol>
-      ${recipe.source_url ? `<p class="recipe-source-note">Saved cleanly in Mealz · <a class="source-link" href="${escapeHtml(recipe.source_url)}" target="_blank" rel="noopener">Source ↗</a></p>` : ''}
-      <div class="recipe-actions" style="margin-top:18px"><button type="button" class="btn btn-primary" data-action="cook" data-recipe-id="${recipe.id}">Start Cooking</button><button type="button" class="btn btn-outline" data-action="plan-recipe" data-recipe-id="${recipe.id}">Plan This</button></div>
-      <div class="recipe-manage-actions"><button type="button" class="btn btn-outline btn-small" data-action="edit-recipe" data-recipe-id="${recipe.id}">Edit / Rename</button><button type="button" class="btn btn-outline btn-small" data-action="duplicate-recipe" data-recipe-id="${recipe.id}">Duplicate</button><button type="button" class="btn btn-danger btn-small" data-action="delete-recipe" data-recipe-id="${recipe.id}">Delete</button></div>
-    </div>`;
+    const body = `
+      <div class="tile-grid">
+        <button type="button" class="tile" data-action="cook" data-recipe-id="${recipe.id}"><span class="tile-icon">👨‍🍳</span><strong>Start Cooking</strong></button>
+        <button type="button" class="tile" data-action="plan-recipe" data-recipe-id="${recipe.id}"><span class="tile-icon">📅</span><strong>Plan This</strong></button>
+      </div>
+      <div class="recipe-detail panel" style="margin-top:12px">
+        <div class="detail-meta">${escapeHtml(dishTypeOf(recipe))} · ${escapeHtml(recipe.cuisine || 'Dinner')} · ${total} min · ${escapeHtml(recipe.difficulty || 'Easy')}</div>
+        <h3>Ingredients</h3><ul class="ingredient-list">${(recipe.ingredients || []).map(i => `<li>${escapeHtml(i.amount || '')} ${escapeHtml(i.name || '')}</li>`).join('')}</ul>
+        <h3>Directions</h3><ol class="step-list">${(recipe.steps || []).map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ol>
+        ${recipe.source_url ? `<p class="recipe-source-note">Saved cleanly in Mealz · <a class="source-link" href="${escapeHtml(recipe.source_url)}" target="_blank" rel="noopener">Source ↗</a></p>` : ''}
+      </div>
+      <div class="sheet-section">
+        <h3>Manage</h3>
+        <div class="tile-grid tile-grid-3">
+          <button type="button" class="tile" data-action="edit-recipe" data-recipe-id="${recipe.id}"><span class="tile-icon">✎</span><strong>Edit</strong></button>
+          <button type="button" class="tile" data-action="duplicate-recipe" data-recipe-id="${recipe.id}"><span class="tile-icon">⧉</span><strong>Duplicate</strong></button>
+          <button type="button" class="tile tile-danger" data-action="delete-recipe" data-recipe-id="${recipe.id}"><span class="tile-icon">🗑</span><strong>Delete</strong></button>
+        </div>
+      </div>`;
     return modalShell(recipe.name, recipe.favorite ? '❤️ Favorite' : '', body);
   }
 
@@ -921,10 +1096,10 @@
   function renderChooseDayModal() {
     const recipe = recipeById(state.modal.recipeId);
     const days = Array.from({ length: 7 }, (_, i) => addDays(state.weekStart, i));
-    const body = `<div class="recommend-list">${days.map(day => {
+    const body = `<div class="pick-list">${days.map(day => {
       const key = dateKey(day);
       const meal = mealForDate(key);
-      return `<div class="recommend-row"><div><strong>${day.toLocaleDateString(undefined, { weekday: 'long' })}</strong><small>${day.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}${meal ? ` · ${escapeHtml(mealDisplay(meal).name)}` : ' · Open'}</small></div><button type="button" class="btn ${meal ? 'btn-outline' : 'btn-primary'} btn-small" data-action="choose-day-for-recipe" data-date="${key}">${meal ? 'Replace' : 'Pick'}</button></div>`;
+      return `<button type="button" class="pick-row" data-action="choose-day-for-recipe" data-date="${key}"><span><strong>${day.toLocaleDateString(undefined, { weekday: 'long' })}</strong><small>${day.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}${meal ? ` · ${escapeHtml(mealDisplay(meal).name)}` : ' · Open'}</small></span><span class="pick-go">${meal ? 'Replace' : 'Pick'}</span></button>`;
     }).join('')}</div>`;
     return modalShell('Choose a day', recipe?.name || '', body);
   }
@@ -932,7 +1107,7 @@
   function renderRecommendWeekModal() {
     const picks = getRecommendations().slice(0, 4);
     const body = `<p class="section-subtitle" style="margin-bottom:12px">These are weighted toward short prep, healthy ingredients, lean protein, fresh vegetables, your favorite cuisines, and meals worth eating again tomorrow.</p>
-      <div class="recommend-list">${picks.map(r => renderPlanRecipeRow(r, false)).join('')}</div>`;
+      <div class="pick-list">${picks.map(r => renderPlanRecipeRow(r, false)).join('')}</div>`;
     return modalShell('Good fits for this week', 'Pick one and then choose the day.', body);
   }
 
@@ -986,10 +1161,17 @@
     const action = button.dataset.action;
 
     try {
-      if (action === 'nav') { state.view = button.dataset.view; state.modal = null; render(); return; }
+      if (action === 'nav') { state.view = button.dataset.view; state.modal = null; render(); window.scrollTo(0, 0); return; }
+      if (action === 'open-meal') { state.modal = { type: 'mealNight', date: button.dataset.date }; render(); return; }
+      if (action === 'save-note') { await saveMealNote(); return; }
+      if (action === 'note-to-grocery') { await sendNoteToGrocery(); return; }
+      if (action === 'leftovers-tomorrow') { await addLeftoverAfter(button.dataset.date, button.dataset.recipeId); return; }
+      if (action === 'plan-type') { state.planTypeFilter = button.dataset.type || 'All'; render(); return; }
+      if (action === 'recipe-favorites') { state.recipeFavoritesOnly = !state.recipeFavoritesOnly; render(); return; }
+      if (action === 'toggle-hide-checked') { state.hideChecked = !state.hideChecked; render(); return; }
       if (action === 'previous-week') { state.weekStart = addDays(state.weekStart, -7); render(); return; }
       if (action === 'next-week') { state.weekStart = addDays(state.weekStart, 7); render(); return; }
-      if (action === 'plan-date') { state.modal = { type: 'plan', date: button.dataset.date, mode: 'recommend' }; render(); return; }
+      if (action === 'plan-date') { state.planSearch = ''; state.planTypeFilter = 'All'; state.modal = { type: 'plan', date: button.dataset.date, mode: 'suggested' }; render(); window.scrollTo(0, 0); return; }
       if (action === 'close-modal') { state.modal = null; render(); return; }
       if (action === 'modal-backdrop' && event.target === button) { state.modal = null; render(); return; }
       if (action === 'plan-mode') { state.modal.mode = button.dataset.mode; render(); return; }
@@ -1036,10 +1218,23 @@
   function handleInput(event) {
     if (event.target.id === 'recipe-search') {
       state.recipeSearch = event.target.value;
-      const active = document.activeElement;
-      render();
-      const input = document.getElementById('recipe-search');
-      if (active && input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+      const list = document.querySelector('.recipe-list');
+      const head = document.querySelector('.list-head');
+      if (!list || !head) { render(); return; }
+      const recipes = filteredRecipes();
+      list.innerHTML = recipeListInner(recipes);
+      head.innerHTML = recipeHeadInner(recipes);
+      return;
+    }
+    if (event.target.id === 'plan-search') {
+      state.planSearch = event.target.value;
+      const list = document.querySelector('.pick-list');
+      if (!list) { render(); return; }
+      list.innerHTML = pickListInner(planPickList(), state.modal?.mode || 'suggested');
+      return;
+    }
+    if (event.target.id === 'meal-note' && state.modal) {
+      state.modal.noteDraft = event.target.value;
     }
   }
 
@@ -1156,11 +1351,51 @@
     await reloadData(); state.modal = null; render(); toast('Tomorrow set to leftovers');
   }
 
+  async function addLeftoverAfter(dateKeyValue, recipeId) {
+    const nextKey = dateKey(addDays(parseLocalDate(dateKeyValue), 1));
+    if (mealForDate(nextKey)) { toast('That day already has a plan'); return; }
+    const recipe = recipeById(recipeId);
+    await store.upsertMeal({ meal_date: nextKey, type: 'leftover', recipe_id: recipeId, label: recipe?.name || '' });
+    await reloadData(); state.modal = null; render(); toast('Tomorrow set to leftovers');
+  }
+
+  function currentNoteDraft() {
+    const field = document.getElementById('meal-note');
+    if (field) return field.value;
+    return String(state.modal?.noteDraft || '');
+  }
+
+  async function saveMealNote() {
+    const key = state.modal?.date;
+    const meal = key ? mealForDate(key) : null;
+    if (!meal) return;
+    const notes = currentNoteDraft().trim();
+    meal.notes = notes;
+    state.modal.noteDraft = notes;
+    render();
+    await store.upsertMeal({ ...meal, notes });
+    await reloadData();
+    render();
+    toast(notes ? 'Note saved' : 'Note cleared');
+  }
+
+  async function sendNoteToGrocery() {
+    const note = currentNoteDraft().trim();
+    if (!note) { toast('Write a note first'); return; }
+    await store.saveGrocery({
+      week_start: weekKey(), name: note, amount: '', category: 'Other', checked: false, manual: true
+    });
+    await reloadData();
+    render();
+    toast('Added to the grocery list');
+  }
+
   async function toggleFavorite(recipeId) {
     const recipe = recipeById(recipeId);
     if (!recipe) return;
-    await store.saveRecipe({ ...recipe, favorite: !recipe.favorite });
-    await reloadData(); render();
+    recipe.favorite = !recipe.favorite;
+    render();
+    await store.saveRecipe({ ...recipe });
   }
 
   async function importRecipeUrl(form) {
@@ -1319,8 +1554,9 @@
   async function toggleGrocery(id, checked) {
     const item = state.groceries.find(g => g.id === id);
     if (!item) return;
+    item.checked = checked;
+    render();
     await store.saveGrocery({ ...item, checked });
-    await reloadData(); render();
   }
 
   async function rateRecipe(rating) {

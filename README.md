@@ -1,8 +1,43 @@
-# Mealz — V4
+# Mealz V5
 
-A mobile-first shared dinner planner and recipe keeper for a busy family week.
+A shared dinner planner and recipe keeper built for phones first.
 
-**Main loop:** **Tonight → This Week → Recipes → Grocery → Cook**
+**Main loop:** Plan the week, pick a recipe, add notes, shop, cook.
+
+## New in V5
+
+### Built for the phone
+The layout is now phone first. Wide screens are the exception instead of the default, so the app no longer renders at desktop width and shrinks to fit on an iPhone. Type is larger, tap targets are bigger, and the bottom bar is anchored to the bottom edge with room for the home indicator.
+
+### Tonight card removed
+The week is the only planning surface now. Every day is a full width row you can tap.
+
+### Tap a meal to open it
+Tapping a planned meal opens a meal sheet for that night. It shows the meal, a notes box, and a grid of actions: Recipe, Cook, Swap, Leftovers, Clear.
+
+### Notes on a planned meal
+Either of you can open a night and add notes such as "potatoes as a side" or "red and yellow bell peppers". Notes are shared, they show on the calendar under the meal name, and a Send to Grocery button drops the note straight onto the grocery list.
+
+### Plan screen is recipe selection
+Tapping Plan on a day opens straight into choosing a recipe. A search box sits at the top, with filter chips for Suggested, Favorites, All, Leftovers, and one for each dish type. Eating Out, New Recipe, and Clear Day moved to small tiles below the results so they stop competing with the main job.
+
+### Recipe library redesigned
+Recipes are now compact rows with a dish type icon, name, type, time, and a favorite toggle. The search and filter bar stays pinned at the top while you scroll. Filters include favorites and every dish type in your collection.
+
+### Faster and steadier
+Typing in either search box no longer rebuilds the screen, so the keyboard and your place in the list stay put. Checking off groceries and tapping a favorite now respond immediately instead of waiting on the database. Scroll position survives a redraw.
+
+### Grocery list
+The list shows how many items are still to get, and a chip hides checked items while you shop.
+
+## Installing V5
+
+1. Run `supabase-v5.sql` once in Supabase, SQL Editor. It adds the notes column used by meal notes.
+2. Do not delete or replace your existing `config.js` in GitHub. This update ZIP intentionally does not include it.
+3. Replace `app.js`, `styles.css`, and `README.md`, and add `supabase-v5.sql`.
+4. Commit, let Vercel redeploy, then refresh once on each phone.
+
+If the app still looks zoomed out on your iPhone, open it in Safari, tap the aA menu in the address bar, and choose Request Mobile Website. Then use Share, Add to Home Screen so it opens as an app.
 
 ## New in V4
 
@@ -70,7 +105,7 @@ Imported data includes:
 - iPhone Home Screen support
 - Accidental double-tap zoom suppression while retaining pinch zoom
 
-## Important: upgrading from V3
+## Upgrading from V3
 
 **No new Supabase SQL is required for V4.** Dish type is stored inside the existing recipe tag data, so your current shared database continues to work.
 
@@ -120,9 +155,10 @@ Mealz skips exact recipe-name duplicates rather than creating copies.
 
 ## Good next additions
 
-1. Prep-ahead mode that combines prep across the week's meals
-2. Serving/leftover scaling for four people plus next-day leftovers
-3. Smarter “similar but new” recommendations using actual Mealz cooking history
-4. Optional recipe photo storage/import
+1. Recipe photos, imported from the Recipe Keeper export into Supabase storage
+2. Offline support so the grocery list works in a store with weak signal
+3. Cooked history, so you can filter by what you have not made in a while
+4. Prep ahead mode that combines prep across the week's meals
+5. Serving and leftover scaling
 
 The product rule stays the same: **make dinner planning easier, not make the app more complicated.**
