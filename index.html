@@ -1,25 +1,562 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#ff8200" />
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-  <meta name="apple-mobile-web-app-title" content="Mealz" />
-  <title>Mealz</title>
-  <link rel="manifest" href="manifest.webmanifest" />
-  <link rel="icon" href="/icon-192.png" sizes="192x192" />
-  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
-  <link rel="stylesheet" href="styles.css" />
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Site Visit">
+<meta name="theme-color" content="#a12b2a">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<title>RDG Site Visit</title>
+<style>
+  :root{
+    --red:#a12b2a; --red-dark:#8a2422; --red-tint:#faf0ef;
+    --ink:#151311; --ink-2:#4a443f; --mute:#8b847c; --faint:#a8a19a;
+    --paper:#f7f6f4; --card:#fff; --line:#e5e1db; --line-2:#efece7;
+    --glass:rgba(255,255,255,.3);
+    --ls:.11em;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;overflow:hidden;background:#000;
+    font:400 16px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    color:#fff;-webkit-user-select:none;user-select:none;touch-action:none}
+  button{cursor:pointer;font:inherit}
+  button:disabled{opacity:.4;cursor:default}
+  button[hidden]{display:none!important}
+  svg{display:block;flex:0 0 auto}
+
+  /* ---------- camera ---------- */
+  #camwrap{position:fixed;inset:0;overflow:hidden;background:#000}
+  #cam{width:100%;height:100%;object-fit:cover;transform-origin:center center;
+    transition:transform .12s ease-out;display:block}
+  #flash{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .09s}
+  #flash.on{opacity:.75;transition:none}
+
+  .topbar{position:fixed;top:0;left:0;right:0;
+    padding:calc(env(safe-area-inset-top) + 10px) 14px 14px;
+    display:flex;align-items:center;gap:7px;z-index:5;
+    background:linear-gradient(180deg,rgba(0,0,0,.72),rgba(0,0,0,.28) 62%,rgba(0,0,0,0))}
+  .markbar{display:flex;align-items:center;gap:8px;flex:0 0 auto;margin-right:2px}
+  .markbar img{width:24px;height:24px;display:block;border-radius:5px;background:#fff}
+  .chip{border:1px solid var(--glass);background:rgba(0,0,0,.4);color:#fff;
+    padding:8px 12px;border-radius:100px;font-size:13px;font-weight:500;backdrop-filter:blur(10px);
+    flex:0 0 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-height:36px}
+  #areaBtn{flex:1 1 auto;min-width:54px;text-align:left}
+  .chip:active{background:rgba(255,255,255,.22)}
+  #finishBtn{background:var(--red);border-color:var(--red);font-weight:650}
+  .count{margin-left:auto;font-variant-numeric:tabular-nums;font-size:13px;opacity:.9;white-space:nowrap}
+  .count b{font-size:19px;font-weight:600}
+
+  .zoomrow{position:fixed;left:0;right:0;bottom:calc(env(safe-area-inset-bottom) + 166px);
+    display:flex;justify-content:center;gap:8px;z-index:5}
+  .zchip{min-width:46px;height:38px;border-radius:100px;border:1px solid var(--glass);
+    background:rgba(0,0,0,.45);color:#fff;font-size:13px;font-weight:600;backdrop-filter:blur(10px)}
+  .zchip.on{background:#fff;color:var(--red);border-color:#fff}
+
+  .dock{position:fixed;left:0;right:0;bottom:0;height:160px;z-index:5;
+    padding:0 24px calc(env(safe-area-inset-bottom) + 16px);
+    display:flex;align-items:center;justify-content:space-between;
+    background:linear-gradient(0deg,rgba(0,0,0,.78),rgba(0,0,0,.34) 55%,rgba(0,0,0,0))}
+  #thumb{width:56px;height:56px;border-radius:12px;border:1.5px solid var(--glass);
+    background:#1c1a19 center/cover no-repeat;position:relative;flex:0 0 auto}
+  #thumb.empty{opacity:.34}
+  #thumb .badge{position:absolute;right:-7px;top:-7px;min-width:23px;height:23px;border-radius:12px;
+    background:var(--red);color:#fff;font-size:12px;font-weight:700;display:grid;place-items:center;
+    padding:0 6px;box-shadow:0 0 0 2px rgba(0,0,0,.45)}
+  #shutter{width:84px;height:84px;border-radius:50%;background:#fff;border:6px solid var(--red);
+    box-shadow:0 0 0 3px rgba(0,0,0,.4);flex:0 0 auto;transition:transform .1s}
+  #shutter:active{transform:scale(.93)}
+  #shutter.busy{background:#dcd8d4}
+  #undo{width:56px;height:56px;flex:0 0 auto;border:1px solid var(--glass);background:rgba(0,0,0,.4);
+    color:#fff;border-radius:12px;font-size:12px;font-weight:600;backdrop-filter:blur(10px);opacity:0;
+    transition:opacity .18s;pointer-events:none}
+  #undo.show{opacity:1;pointer-events:auto}
+
+  .stall{position:fixed;left:16px;right:16px;bottom:calc(env(safe-area-inset-bottom) + 214px);
+    background:var(--red);color:#fff;border:0;border-radius:12px;padding:15px;font:inherit;
+    font-weight:600;display:none;z-index:6;box-shadow:0 10px 30px rgba(0,0,0,.4)}
+  .stall.show{display:block}
+
+  /* ---------- sheets ---------- */
+  .sheet{position:fixed;inset:0;background:var(--paper);color:var(--ink);
+    transform:translateY(100%);transition:transform .24s cubic-bezier(.32,.72,0,1);overflow-y:auto;
+    -webkit-overflow-scrolling:touch;z-index:20;touch-action:auto}
+  .sheet.open{transform:translateY(0)}
+  #vis{z-index:23}
+  .sheethead{position:sticky;top:0;background:rgba(247,246,244,.94);backdrop-filter:blur(12px);z-index:2;
+    padding:calc(env(safe-area-inset-top) + 12px) 14px 12px;
+    display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line)}
+  .sheethead h2{margin:0;font-size:13px;font-weight:700;letter-spacing:var(--ls);text-transform:uppercase;
+    color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .btn{border:0;background:none;color:var(--red);font-size:15px;font-weight:600;padding:9px 2px;
+    white-space:nowrap;min-height:40px}
+  .btn.right{margin-left:auto}
+  .btn[disabled]{opacity:.35}
+
+  /* ---------- photo grid ---------- */
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:2px;padding:2px}
+  .cell{position:relative;aspect-ratio:1;background:#dedad4 center/cover no-repeat;border:0;padding:0}
+  .cell .t{position:absolute;left:0;right:0;bottom:0;padding:5px 6px;font-size:10.5px;color:#fff;
+    background:linear-gradient(0deg,rgba(0,0,0,.75),transparent);font-variant-numeric:tabular-nums;
+    letter-spacing:.02em}
+  .cell .n{position:absolute;left:5px;top:5px;background:rgba(0,0,0,.62);color:#fff;
+    font-size:10.5px;font-weight:600;padding:2px 6px;border-radius:4px;font-variant-numeric:tabular-nums}
+  .cell.noted:after{content:"";position:absolute;right:6px;top:6px;width:8px;height:8px;
+    border-radius:50%;background:var(--red);box-shadow:0 0 0 1.5px #fff}
+
+  /* ---------- forms & content ---------- */
+  .pad{padding:18px 16px}
+  .sheet .pad{padding-bottom:calc(34px + env(safe-area-inset-bottom))}
+  .shot{width:100%;border-radius:12px;display:block;background:#dedad4}
+  .meta{font-size:13px;color:var(--mute);margin:10px 0 4px;font-variant-numeric:tabular-nums}
+  textarea{width:100%;min-height:132px;border:1px solid var(--line);border-radius:12px;padding:13px;
+    font:inherit;background:var(--card);color:var(--ink);resize:none;-webkit-appearance:none}
+  .lbl{display:block;font-size:11px;font-weight:700;letter-spacing:var(--ls);text-transform:uppercase;
+    color:var(--faint);margin:20px 0 8px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px}
+  .tag{border:1px solid var(--line);background:var(--card);color:var(--ink-2);padding:11px 16px;
+    border-radius:100px;font-size:14.5px;font-weight:500;min-height:44px}
+  .tag.on{background:var(--red);border-color:var(--red);color:#fff;font-weight:600}
+  .danger{color:var(--red);border:1px solid #e6d5d4;background:var(--card);width:100%;
+    padding:15px;border-radius:12px;font:inherit;font-weight:600;margin:26px 0 8px;min-height:50px}
+  .primary{background:var(--red);color:#fff;border:0;width:100%;padding:17px;border-radius:12px;
+    font:inherit;font-weight:650;font-size:16px;margin-top:10px;min-height:54px;
+    box-shadow:0 6px 18px rgba(161,43,42,.22)}
+  .primary:active{background:var(--red-dark)}
+  .ghost{background:var(--card);color:var(--ink);border:1px solid var(--line);width:100%;padding:15px;
+    border-radius:12px;font:inherit;font-weight:600;margin-top:10px;min-height:50px}
+  .ghost:active{background:#f0eeea}
+  input[type=text]{width:100%;border:1px solid var(--line);border-radius:12px;padding:14px;
+    font:inherit;background:var(--card);color:var(--ink);margin-bottom:10px;-webkit-appearance:none}
+  select,input[type=date]{width:100%;font:inherit;padding:13px;background:var(--card);color:var(--ink);
+    border:1px solid var(--line);border-radius:12px;margin-bottom:10px;min-height:50px}
+  input:focus,textarea:focus,select:focus{outline:none;border-color:var(--red);
+    box-shadow:0 0 0 3px rgba(161,43,42,.12)}
+  .empty{padding:64px 30px;text-align:center;color:var(--mute);font-size:15px}
+  .auto{font-size:12.5px;line-height:1.5;color:var(--mute);margin:-2px 0 14px}
+
+  /* ---------- tiles ---------- */
+  .tiles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}
+  /* margins, not gap: app.js sets inline display:block on some of these buttons */
+  .tile{display:flex;flex-direction:column;align-items:flex-start;text-align:left;
+    background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 13px;
+    color:var(--ink);font:inherit;font-weight:600;font-size:14.5px;min-height:88px;
+    justify-content:flex-start;width:100%}
+  .tile svg{margin:0 0 12px}
+  .tile:active{background:#f0eeea}
+  .tile svg{color:var(--red)}
+  .tile.wide{grid-column:1 / -1;flex-direction:row;align-items:center;min-height:60px}
+  .tile.wide svg{margin:0 12px 0 0}
+  .tile.accent{background:var(--red);border-color:var(--red);color:#fff;
+    box-shadow:0 6px 18px rgba(161,43,42,.22)}
+  .tile.accent svg{color:#fff}
+  .tile.accent:active{background:var(--red-dark)}
+  .tile .sub{display:block;margin-top:3px;font-size:12px;font-weight:400;color:var(--mute);letter-spacing:0}
+  .tile.accent .sub{color:rgba(255,255,255,.8)}
+
+  /* ---------- area sheet ---------- */
+  .areasheet{position:fixed;left:0;right:0;bottom:0;background:var(--paper);color:var(--ink);
+    border-radius:20px 20px 0 0;padding:16px 16px calc(env(safe-area-inset-bottom) + 18px);
+    transform:translateY(110%);transition:transform .22s cubic-bezier(.32,.72,0,1);z-index:25;
+    touch-action:auto;box-shadow:0 -14px 40px rgba(0,0,0,.3)}
+  .areasheet.open{transform:translateY(0)}
+  .areasheet .row{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+  .areasheet h3{margin:0;font-size:12px;font-weight:700;letter-spacing:var(--ls);text-transform:uppercase}
+  .recent{display:flex;flex-wrap:wrap;gap:8px;margin-top:2px}
+  .scrim{position:fixed;inset:0;background:rgba(0,0,0,.42);opacity:0;pointer-events:none;
+    transition:opacity .2s;z-index:24}
+  .scrim.open{opacity:1;pointer-events:auto}
+
+  /* ---------- start ---------- */
+  .start{position:fixed;inset:0;background:var(--paper);color:var(--ink);z-index:30;
+    display:flex;flex-direction:column;overflow-y:auto;-webkit-overflow-scrolling:touch;
+    touch-action:auto;padding:0 0 calc(30px + env(safe-area-inset-bottom))}
+  .start.hide{display:none}
+  .start>*{flex-shrink:0}
+  .masthead{background:var(--ink);color:#fff;
+    padding:calc(env(safe-area-inset-top) + 18px) 22px 20px;
+    display:flex;align-items:center;gap:12px}
+  .masthead img{width:36px;height:36px;display:block;border-radius:7px;background:#fff}
+  .masthead .wm{font-size:11px;font-weight:700;letter-spacing:.16em;line-height:1.5;
+    color:rgba(255,255,255,.62)}
+  .masthead .wm b{display:block;font-size:15px;font-weight:650;letter-spacing:.1em;color:#fff}
+  .masthead .svr{margin-left:auto;font-size:11px;font-weight:700;letter-spacing:var(--ls);
+    color:#fff;background:var(--red);padding:7px 11px;border-radius:100px;white-space:nowrap;
+    font-variant-numeric:tabular-nums}
+  .sec{padding:0 18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;
+    margin-top:16px}
+  .card>.lbl:first-child{margin-top:0}
+  #selectedProjectName{font-size:19px;font-weight:650;letter-spacing:-.2px;margin:2px 0 0;
+    overflow-wrap:anywhere;line-height:1.25}
+  .projrow{display:flex;gap:18px;margin-top:10px;padding-top:10px;border-top:1px solid var(--line-2)}
+  .projrow .btn{padding:6px 0;min-height:36px}
+  .state{font-size:14px;color:var(--mute);line-height:1.45;min-height:20px;margin-top:10px}
+  .state b{font-weight:650;color:var(--ink)}
+  .start .actions{margin-top:14px}
+  .fields{margin-top:18px;background:var(--card);border:1px solid var(--line);border-radius:16px;
+    overflow:hidden}
+  .fieldnote{font-size:11px;font-weight:700;letter-spacing:var(--ls);text-transform:uppercase;
+    color:var(--faint);margin:0;padding:14px 16px 8px}
+  .frow{display:flex;align-items:center;gap:10px;border-top:1px solid var(--line-2);padding:0 16px}
+  .frow label{flex:0 0 92px;font-size:11px;font-weight:700;letter-spacing:var(--ls);
+    text-transform:uppercase;color:var(--mute)}
+  .frow input[type=text]{flex:1;min-width:0;border:0;background:none;margin:0;
+    padding:15px 0;font:inherit;font-size:15px;color:var(--ink);border-radius:0}
+  .frow input[type=text]::placeholder{color:#c2bbb4}
+  .frow input[type=text]:focus{outline:none;box-shadow:none}
+  .frow:focus-within label{color:var(--red)}
+
+  .sechead{display:flex;align-items:baseline;gap:10px;margin:26px 0 0}
+  .sechead .fieldnote{padding:0}
+  .past{margin-top:10px;background:var(--card);border:1px solid var(--line);border-radius:16px;
+    overflow:hidden}
+  .prow{display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;
+    border-top:1px solid var(--line-2);padding:15px 16px;font:inherit;text-align:left;
+    color:var(--ink);min-height:56px}
+  .past .prow:first-child{border-top:0}
+  .prow:active{background:#f2f0ec}
+  .prow .pn{font-weight:700;font-size:13px;letter-spacing:.04em;flex:0 0 64px;color:var(--red);
+    font-variant-numeric:tabular-nums}
+  .prow .pd{font-size:13.5px;color:var(--mute);flex:1;min-width:0;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  .prow .po{font-size:14px;font-weight:600;color:var(--red);flex:0 0 auto}
+
+  .notice{padding:15px;border:1px solid #e4d3bd;border-radius:14px;margin:16px 0 0;background:#fdf6ea}
+  .notice p{margin:0 0 6px;font-size:14px;color:#6b5a42}
+  .notice .btn{color:#8a5a1f}
+  .tools{margin-top:26px;padding:0 18px}
+  .tools details{background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:2px 14px 10px;margin-top:10px}
+  .tools details[open]{padding-bottom:14px}
+  details>summary{cursor:pointer;padding:14px 0;font-size:11px;font-weight:700;
+    letter-spacing:var(--ls);text-transform:uppercase;color:var(--mute);list-style:none}
+  details>summary::-webkit-details-marker{display:none}
+  details>summary:after{content:"+";float:right;font-size:15px;color:var(--faint)}
+  details[open]>summary:after{content:"–"}
+  .metaLines{margin:22px 18px 0;display:flex;flex-wrap:wrap;gap:4px 16px;padding-top:14px;
+    border-top:1px solid var(--line);font-size:11.5px;color:var(--faint);
+    font-variant-numeric:tabular-nums;letter-spacing:.04em;text-transform:uppercase;font-weight:600}
+
+  /* ---------- items / cloud / busy ---------- */
+  #itemsSheet{z-index:35}#itemEditor{z-index:36}#det{z-index:24}
+  #cloudSheet,#cleanupSheet{z-index:40}
+  .itemcard{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin:12px 0}
+  .itemcard h3{margin:0 0 8px;font-size:15px;font-weight:700;letter-spacing:.02em}
+  .itemcard p{white-space:pre-wrap;margin:8px 0;font-size:14.5px;color:var(--ink-2)}
+  .itemcard img{width:100%;max-height:220px;object-fit:contain;background:#eeebe7;border-radius:10px}
+  .itemcard .chips{margin-top:12px}
+  .itemcard.safety{border:1.5px solid var(--red);background:var(--red-tint)}
+  .itemcard.safety h3,.itemcard.safety p{color:var(--red);font-weight:700}
+  .file-row{display:flex;gap:12px;align-items:center;margin:10px 0;background:var(--card);
+    border:1px solid var(--line);border-radius:12px;padding:12px}
+  .file-row span{flex:1;min-width:0;overflow-wrap:anywhere;font-size:13px;color:var(--ink-2)}
+  .file-row button{flex-shrink:0;margin-top:0;width:auto;padding:11px 14px}
+  .cloud-status{font-size:14px;white-space:pre-wrap;line-height:1.55;color:var(--ink-2)}
+  .cloud-note{font-size:14px;line-height:1.55;color:var(--ink-2)}
+  .steps{counter-reset:s;margin:14px 0 4px;padding:0;list-style:none}
+  .steps li{counter-increment:s;position:relative;padding:0 0 14px 34px;font-size:14px;
+    line-height:1.5;color:var(--ink-2)}
+  .steps li:before{content:counter(s);position:absolute;left:0;top:-1px;width:23px;height:23px;
+    border-radius:50%;background:var(--red);color:#fff;font-size:12px;font-weight:700;
+    display:grid;place-items:center}
+  .busywrap{position:fixed;inset:0;background:rgba(0,0,0,.76);display:none;place-items:center;
+    z-index:60;text-align:center;padding:30px;backdrop-filter:blur(4px)}
+  .busywrap.show{display:grid}
+  .busywrap div{font-size:15px}
+  #busyClose{width:auto;padding:13px 22px}
+  #projectSelect{display:block;flex:none;min-height:52px;appearance:auto;-webkit-appearance:menulist;
+    color:var(--ink);-webkit-text-fill-color:var(--ink);background-color:var(--card);
+    line-height:normal;white-space:nowrap;margin-bottom:0}
+  #projectSelect option{color:var(--ink);background:#fff}
+  #sState{margin-top:12px}
+  a{color:var(--red)}a:hover{color:var(--red-dark)}
+</style>
 </head>
 <body>
-  <div id="app" aria-live="polite"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script src="config.js"></script>
-  <script src="lib/recipekeeper-client.js"></script>
-  <script src="app.js"></script>
+<div id="camwrap"><video id="cam" playsinline autoplay muted></video></div>
+<div id="flash"></div>
+
+<div class="topbar">
+  <div class="markbar"><img src="icon-512.png" alt="Redline Design Group"></div>
+  <button class="chip" id="pauseBtn">Pause</button>
+  <button class="chip" id="projBtn">Visit info</button>
+  <button class="chip" id="areaBtn">Set area</button>
+  <button class="chip" id="finishBtn">Finish</button>
+</div>
+
+<button class="stall" id="stall">Camera stalled. Tap to restart.</button>
+<div class="zoomrow" id="zoomRow"></div>
+
+<div class="dock">
+  <button id="thumb" class="empty" aria-label="Review photos"></button>
+  <button id="shutter" aria-label="Take photo"></button>
+  <button id="undo">Undo</button>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<div class="areasheet" id="areaSheet">
+  <div class="row">
+    <h3>Area</h3>
+    <button class="btn right" id="areaDone">Done</button>
+  </div>
+  <input type="text" id="areaInput" placeholder="Level 2, Exterior, Mech Room" autocomplete="off">
+  <div class="recent" id="areaRecent"></div>
+</div>
+
+<!-- visit info -->
+<section class="sheet" id="vis">
+  <div class="sheethead">
+    <button class="btn" id="visClose">Back</button>
+    <h2>Visit info</h2>
+    <button class="btn right" id="visSave">Save</button>
+  </div>
+  <div class="pad">
+    <label class="lbl" for="vProject" style="margin-top:0">Project</label>
+    <input type="text" id="vProject" placeholder="Project name">
+    <input type="text" id="vNum" placeholder="Project number">
+    <label class="lbl" for="vDate">Visit date</label><input type="date" id="vDate">
+    <label class="lbl" for="vAtt">Present</label>
+    <input type="text" id="vAtt" placeholder="Who you walked with">
+    <label class="lbl" for="vBy">Prepared by</label>
+    <input type="text" id="vBy" placeholder="Your name">
+    <label class="lbl" for="vWx">Weather</label>
+    <input type="text" id="vWx" placeholder="Fetched automatically">
+    <input type="text" id="vTemp" placeholder="Temperature">
+    <div class="auto" id="vAuto"></div>
+    <button class="ghost" id="vPause">Pause and go to Start</button>
+  </div>
+</section>
+
+<!-- gallery -->
+<section class="sheet" id="gal">
+  <div class="sheethead">
+    <button class="btn" id="galClose">Camera</button>
+    <h2 id="galTitle">Visit</h2>
+    <button class="btn right" id="galExport">Export</button>
+  </div>
+  <div class="grid" id="grid"></div>
+  <div class="empty" id="galEmpty" style="display:none">No photos yet.</div>
+  <div class="pad">
+    <div class="tiles">
+      <button class="tile" id="galItems">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 6.5h12M4 12h12M4 17.5h8"/><path d="M19.5 5.5l1.5 1.5 2.5-3" stroke-width="2.1"/></svg>
+        Review items
+      </button>
+      <button class="tile" id="galBack">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5a2 2 0 0 1 2-2h2.2l1.2-2h7.2l1.2 2H19a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.4"/></svg>
+        Keep shooting
+      </button>
+      <button class="tile" id="galPause">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M9 5.5v13M15 5.5v13"/></svg>
+        Pause
+        <span class="sub">Back to Start</span>
+      </button>
+      <button class="tile" id="galToStart" style="display:none">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11l8-6.5 8 6.5"/><path d="M6.5 10v9h11v-9"/></svg>
+        Back to Start
+      </button>
+      <button class="tile accent wide" id="galBuild">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5h8l4.5 4.5v12.5H6z"/><path d="M13.5 3.5V8H18"/><path d="M9 12.5h6M9 16h4"/></svg>
+        Build the report
+      </button>
+    </div>
+    <button class="ghost" id="galCloud">Save to Cloud</button>
+    <button class="ghost" id="galInfo" hidden>Visit info</button>
+    <button class="danger" id="galEnd">Complete this visit</button>
+  </div>
+</section>
+
+<!-- detail -->
+<section class="sheet" id="det">
+  <div class="sheethead">
+    <button class="btn" id="detClose">Back</button>
+    <h2 id="detTitle">Observation</h2>
+    <button class="btn right" id="detSave">Save</button>
+  </div>
+  <div class="pad">
+    <img class="shot" id="detImg" alt="">
+    <div class="meta" id="detMeta"></div>
+    <label class="lbl" for="detNote">Note</label>
+    <textarea id="detNote" placeholder="Tap the microphone on your keyboard and talk."></textarea>
+    <div class="lbl">Tag</div>
+    <div class="chips" id="tagRow"></div>
+    <label class="lbl" for="detArea">Area</label>
+    <input type="text" id="detArea" placeholder="Level 2, Exterior, Mech Room">
+    <label class="lbl" for="detSheet">Sheet or room</label>
+    <input type="text" id="detSheet" placeholder="A2.01, Room 214">
+    <div id="actionBits" style="display:none">
+      <label class="lbl" for="detOwner">Owner</label>
+      <input type="text" id="detOwner" placeholder="Who owns it">
+      <div class="lbl">Due</div>
+      <div class="chips" id="dueRow"></div>
+      <label class="lbl" for="detDue">Select date</label>
+      <input type="date" id="detDue" aria-label="Select due date">
+    </div>
+    <button class="danger" id="detDel">Delete this photo</button>
+  </div>
+</section>
+
+<!-- report ready -->
+<section class="sheet" id="done">
+  <div class="sheethead">
+    <button class="btn" id="doneClose">Back</button>
+    <h2>Report ready</h2>
+  </div>
+  <div class="pad">
+    <div class="lbl" style="margin-top:0">File</div>
+    <div id="doneName" style="font-size:15px;font-weight:600;word-break:break-all"></div>
+    <div class="auto" id="doneNote" style="margin-top:8px"></div>
+    <button class="primary" id="doneCloud">Save to Cloud</button>
+    <div class="tiles">
+      <button class="tile" id="doneShare">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="M8 7.5L12 3.5l4 4"/><path d="M5 13v6.5h14V13"/></svg>
+        Share
+        <span class="sub">Email or AirDrop</span>
+      </button>
+      <button class="tile" id="doneSave">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg>
+        Save to Files
+      </button>
+      <button class="tile" id="doneInfo" onclick="openVisitInfo()">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v6M12 7.6v.6"/></svg>
+        Visit info
+      </button>
+      <button class="tile" id="doneComplete">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M8.2 12.3l2.6 2.6 5-5.4"/></svg>
+        Complete
+        <span class="sub">Make read only</span>
+      </button>
+      <button class="tile wide" id="doneStart">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11l8-6.5 8 6.5"/><path d="M6.5 10v9h11v-9"/></svg>
+        Back to Start
+      </button>
+    </div>
+  </div>
+</section>
+
+<section class="start" id="start">
+  <div class="masthead">
+    <img src="icon-512.png" alt="">
+    <div class="wm">REDLINE DESIGN GROUP<b>SITE VISIT</b></div>
+    <div class="svr" id="sNum">SVR 001</div>
+  </div>
+
+  <div class="sec">
+    <div class="card">
+      <label class="lbl" for="projectSelect">Project</label>
+      <select id="projectSelect" aria-label="Select project"></select>
+      <div id="selectedProjectName" aria-live="polite"></div>
+      <div class="projrow">
+        <button class="btn" id="addProject">Add project</button>
+        <button class="btn" id="editProject">Edit project</button>
+      </div>
+      <div class="state" id="sState"></div>
+    </div>
+
+    <div class="actions">
+      <button class="primary" id="resumeBtn" style="display:none">Resume</button>
+      <button class="primary" id="startBtn">Start new visit</button>
+    </div>
+
+    <div class="fields" style="display:none">
+      <div class="fieldnote" id="sFieldNote">Carries into the next report</div>
+      <div class="frow"><label for="sfProject">Project</label>
+        <input type="text" id="sfProject" placeholder="Project name" autocomplete="off" autocapitalize="words"></div>
+      <div class="frow"><label for="sfNum">Number</label>
+        <input type="text" id="sfNum" placeholder="Project number" autocomplete="off"></div>
+      <div class="frow"><label for="sfAtt">Present</label>
+        <input type="text" id="sfAtt" placeholder="Who you walked with" autocomplete="off" autocapitalize="words"></div>
+      <div class="frow"><label for="sfBy">Prepared by</label>
+        <input type="text" id="sfBy" placeholder="Your name" autocomplete="off" autocapitalize="words"></div>
+    </div>
+
+    <div class="notice" id="cleanupNotice" hidden>
+      <p id="cleanupCount"></p>
+      <button class="btn" id="reviewCleanup">Review phone storage</button>
+    </div>
+
+    <div class="past" id="pastWrap" style="display:none">
+      <div class="fieldnote">Past visits</div>
+      <div id="pastList"></div>
+    </div>
+  </div>
+
+  <div class="tools">
+    <p class="auto">Open a visit and choose Save to Cloud to save one ZIP with its report, photos, photo index and project recovery file.</p>
+    <details>
+      <summary>Storage</summary>
+      <button class="ghost" id="restoreProject">Open recovery file</button>
+      <input hidden type="file" id="projectFile" accept=".json,application/json">
+      <button class="ghost" id="manageStorage">Review phone storage</button>
+      <button class="ghost" id="backup">Save all app data</button>
+      <button class="ghost" id="restore">Restore backup</button>
+      <input hidden type="file" id="restoreFile" accept=".json,application/json">
+    </details>
+    <details>
+      <summary>App</summary>
+      <button class="ghost" id="checkUpdate">Check for update</button>
+      <div class="auto" id="updateNote" style="margin:10px 0 0"></div>
+    </details>
+  </div>
+
+  <div class="metaLines">
+    <span id="sDate"></span><span id="sBuild"></span>
+  </div>
+</section>
+
+<section class="sheet" id="itemsSheet">
+ <div class="sheethead"><button class="btn" id="itemsClose">Back</button><h2 id="itemsTitle">Visit items</h2></div>
+ <div class="pad"><p class="auto">Review here or continue to the camera. Untouched items remain open and print as not reviewed.</p>
+ <div id="itemsList"></div><button class="ghost" id="addItem">Add item without photo</button>
+ <button class="primary" id="itemsContinue" style="margin-top:16px">Continue to camera</button></div>
+</section>
+
+<section class="sheet" id="itemEditor">
+ <div class="sheethead"><button class="btn" id="itemCancel">Back</button><h2>Item details</h2><button class="btn right" id="itemSave">Save</button></div>
+ <div class="pad"><label class="lbl" for="itemNote" style="margin-top:0">Description</label><textarea id="itemNote"></textarea>
+ <label class="lbl" for="itemOwner">Owner</label><input type="text" id="itemOwner">
+ <label class="lbl" for="itemDue">Select date (due date)</label><input type="date" id="itemDue">
+ <label class="lbl" for="itemArea">Area</label><input type="text" id="itemArea">
+ <label class="lbl" for="itemUpdate">Update for this visit</label><textarea id="itemUpdate"></textarea></div>
+</section>
+
+<section class="sheet" id="cloudSheet">
+ <div class="sheethead"><button class="btn" id="cloudClose">Back</button><h2>Save to Cloud</h2></div>
+ <div class="pad">
+  <h3 id="cloudTitle" style="margin:0;font-size:19px;font-weight:650;letter-spacing:-.2px"></h3>
+  <ol class="steps">
+   <li>Get on Wi-Fi, then save the complete visit ZIP below.</li>
+   <li>Choose <b>Save to Files → iCloud Drive</b> and pick your project folder.</li>
+   <li>Extract the ZIP there to reveal the organized SVR folder.</li>
+  </ol>
+  <p class="cloud-note">Nothing uploads automatically. Saving to Files hands the files to your phone; check iCloud has finished uploading before removing local copies.</p>
+  <p class="cloud-status" id="cloudStatus" role="status" aria-live="polite"></p>
+  <div id="cloudFiles"></div>
+  <button class="ghost" id="cloudChecked">I checked my files in iCloud</button>
+  <p class="auto" id="cloudConfirmed" style="margin-top:12px"></p>
+ </div>
+</section>
+
+<section class="sheet" id="cleanupSheet">
+ <div class="sheethead"><button class="btn" id="cleanupClose">Back</button><h2>Phone storage</h2></div>
+ <div class="pad"><p class="cloud-note">Completed visits become eligible 30 days after completion. Nothing is removed automatically. Check the report, photos and recovery file in your cloud before removing a local copy.</p>
+ <p class="cloud-note">Visit summaries, numbering and item history stay here. Photos needed by currently open items stay too. To view removed photos or rebuild an old report, restore its project recovery file.</p>
+ <div id="cleanupList"></div></div>
+</section>
+
+<div class="busywrap" id="busyWrap"><div>
+  <div id="busyText">Building report</div>
+  <button class="ghost" id="busyClose" style="display:none;margin-top:20px">Back</button>
+</div></div>
+
+<script src="docx.umd.js"></script>
+<script src="report.js"></script>
+<script src="archive.js"></script>
+<script src="cloud.js"></script>
+<script src="app.js"></script>
 </body>
 </html>
