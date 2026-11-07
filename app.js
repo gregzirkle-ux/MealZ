@@ -1,6 +1,9 @@
 (() => {
   'use strict';
 
+  // Bump this, and version.json, with every update so More shows which one is running.
+  const APP_VERSION = '7.2.1';
+
   const root = document.getElementById('app');
   const config = window.MEALZ_CONFIG || window.WEEKNIGHT_CONFIG || {};
   const sharedMode = Boolean(config.supabaseUrl && config.supabasePublishableKey && window.supabase);
@@ -830,7 +833,7 @@
       const stopAll = offline || response.status === 401 || result.code === 'NO_KEY';
       const message = offline
         ? 'Ingredient conversion runs on the live site.'
-        : (result.error || `Conversion failed (${response.status}).`);
+        : (result.error || (result.code === 'NO_KEY' ? 'Ingredient conversion is not set up yet.' : 'Ingredient conversion had a problem. It will try again next time you open Mealz.'));
       throw Object.assign(new Error(message), { stopAll });
     }
     // If the recipe was edited while this was running, leave it for the next pass.
@@ -858,6 +861,25 @@
     await reloadData();
     render();
     toast('Marked as checked');
+  }
+
+  async function checkForUpdate(button) {
+    button.disabled = true;
+    button.textContent = 'Checking…';
+    try {
+      const response = await fetch(`/version.json?t=${Date.now()}`, { cache: 'no-store' });
+      const latest = String((await response.json()).version || '');
+      if (latest && latest !== APP_VERSION) {
+        toast(`Updating to version ${latest}…`);
+        setTimeout(() => location.reload(), 600);
+        return;
+      }
+      toast(`You have the newest version (${APP_VERSION})`);
+    } catch {
+      toast('Could not check right now. Try again in a minute.');
+    }
+    button.disabled = false;
+    button.textContent = 'Check for Update';
   }
 
   async function savePrefs(next) {
@@ -1306,6 +1328,7 @@
       <div class="more-list" style="margin-top:14px">
         <div class="more-row"><div><strong>${sharedMode ? `Signed in as ${escapeHtml(state.member?.display_name || state.user?.email || '')}` : 'Demo Mode'}</strong><span>${sharedMode ? escapeHtml(state.user?.email || 'Signed in') : 'Data is currently saved only on this device.'}</span></div><span>${sharedMode ? '☁' : '◉'}</span></div>
         ${sharedMode ? `<div class="more-row"><div><strong>Household</strong><span>${state.members.length > 1 ? escapeHtml(state.members.map(m => m.display_name || m.email).join(' and ')) + ' share everything.' : 'Waiting for Stephanie to create her account.'}</span></div><span>🏠</span></div>` : ''}
+        <div class="more-row"><div><strong>Version ${APP_VERSION}</strong><span>Tap to make sure you have the newest Mealz.</span></div><button type="button" class="btn btn-outline btn-small" data-action="check-update">Check for Update</button></div>
         ${renderUnitSettings()}
         ${renderIngredientStatus()}
         <div class="more-row"><div><strong>Recipe style</strong><span>Fast prep · healthy · lean protein · fresh vegetables · simple.</span></div><span>✓</span></div>
@@ -1740,6 +1763,7 @@
       if (action === 'save-leftovers') { await saveLeftovers(); return; }
       if (action === 'remove-leftovers') { await removeLeftovers(); return; }
       if (action === 'looks-right') { await markRecipeChecked(button.dataset.recipeId); return; }
+      if (action === 'check-update') { await checkForUpdate(button); return; }
       if (action === 'set-pref') { await savePrefs({ [button.dataset.pref]: button.dataset.value }); return; }
       if (action === 'open-filter') { pushModal({ type: 'filter', context: button.dataset.context || 'recipes' }); render(); return; }
       if (action === 'toggle-favorites-filter') { const f = filterFor(button.dataset.context); f.favoritesOnly = !f.favoritesOnly; render(); return; }
