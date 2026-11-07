@@ -1466,9 +1466,9 @@
     const noteValue = state.modal.noteDraft != null ? state.modal.noteDraft : String(meal.notes || '');
     const source = meal.type === 'leftover' && meal.source_meal_id ? state.meals.find(m => m.id === meal.source_meal_id) : null;
     const leftoverNights = meal.type === 'meal' ? linkedLeftovers(meal) : [];
-    const leftoverSummary = recipe && meal.type === 'meal' && hasExtra(meal, recipe)
-      ? `${plannedServings(meal, recipe)} servings${leftoverNights.length ? ` · ${leftoverNights.length} ${leftoverNights.length === 1 ? 'night' : 'nights'}` : ''}`
-      : 'Make extra';
+    const leftoverSummary = recipe && meal.type === 'meal'
+      ? `${plannedServings(meal, recipe)} servings${leftoverNights.length ? ` · ${leftoverNights.length} leftover ${leftoverNights.length === 1 ? 'night' : 'nights'}` : ''}`
+      : '';
 
     const plannedBy = memberName(meal.updated_by);
     const body = `
@@ -1493,7 +1493,7 @@
           ${recipe ? `<button type="button" class="tile" data-action="view-recipe" data-recipe-id="${recipe.id}"><span class="tile-icon">📖</span><strong>Recipe</strong></button>` : ''}
           ${recipe ? `<button type="button" class="tile" data-action="cook" data-recipe-id="${recipe.id}"><span class="tile-icon">👨‍🍳</span><strong>Cook</strong></button>` : ''}
           <button type="button" class="tile" data-action="plan-date" data-date="${key}"><span class="tile-icon">🔄</span><strong>Swap</strong></button>
-          ${recipe && meal.type === 'meal' ? `<button type="button" class="tile ${hasExtra(meal, recipe) ? 'tile-on' : ''}" data-action="open-leftovers" data-date="${key}"><span class="tile-icon">🟡</span><strong>Leftovers</strong><span>${escapeHtml(leftoverSummary)}</span></button>` : ''}
+          ${recipe && meal.type === 'meal' ? `<button type="button" class="tile ${hasExtra(meal, recipe) ? 'tile-on' : ''}" data-action="open-leftovers" data-date="${key}"><span class="tile-icon">🍲</span><strong>Servings</strong><span>${escapeHtml(leftoverSummary)}</span></button>` : ''}
           ${source ? `<button type="button" class="tile" data-action="open-meal" data-date="${source.meal_date}"><span class="tile-icon">🍳</span><strong>Cook Night</strong><span>${escapeHtml(weekdayName(source.meal_date))}</span></button>` : ''}
           <button type="button" class="tile tile-danger" data-action="clear-day"><span class="tile-icon">×</span><strong>Clear</strong></button>
         </div>
@@ -1538,11 +1538,7 @@
       return `<button type="button" class="tile ${nights === n ? 'tile-on' : ''}" data-action="leftover-nights" data-nights="${n}"><strong>${label}</strong><span>${escapeHtml(sub)}</span></button>`;
     }).join('');
     const body = `
-      <div class="panel leftover-intro"><p>${yieldText} Pick how many leftover dinners you want, then the total servings to cook.</p></div>
-      <div class="sheet-section">
-        <h3>Leftover dinners</h3>
-        <div class="tile-grid">${nightTiles}</div>
-      </div>
+      <div class="panel leftover-intro"><p>${yieldText} Set how many servings to cook. To plan leftover dinners, pick nights below and the servings go up 4 for each.</p></div>
       <div class="sheet-section">
         <h3>Total servings to cook</h3>
         <div class="stepper">
@@ -1552,11 +1548,15 @@
         </div>
         <p class="form-help centered">Never less than 4. Each leftover dinner adds 4. The grocery list buys for ${servings}.</p>
       </div>
+      <div class="sheet-section">
+        <h3>Leftover dinners</h3>
+        <div class="tile-grid">${nightTiles}</div>
+      </div>
       <div class="sheet-section note-actions">
         <button type="button" class="btn btn-primary" data-action="save-leftovers">Save</button>
         ${linked.length || hasExtra(meal, recipe) ? '<button type="button" class="btn btn-outline btn-danger-text" data-action="remove-leftovers">Remove Leftovers</button>' : '<button type="button" class="btn btn-outline" data-action="close-modal">Cancel</button>'}
       </div>`;
-    return modalShell('Leftovers', `${weekdayName(date)} · ${recipe.name}`, body);
+    return modalShell('Servings and Leftovers', `${weekdayName(date)} · ${recipe.name}`, body);
   }
 
   function renderRecipeDetailModal() {
