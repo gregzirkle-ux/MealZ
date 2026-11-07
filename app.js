@@ -33,6 +33,8 @@
       plan: { types: [], time: 'any', favoritesOnly: false }
     },
     hideChecked: false,
+    ingredientLines: [],
+    prefs: { numbers: 'fractions', weights: 'lb_oz' },
     cook: null,
     authMessage: '',
     authError: '',
@@ -61,8 +63,29 @@
       tags: Array.isArray(recipe.tags) ? recipe.tags.filter(Boolean).map(String) : [],
       ingredients: Array.isArray(recipe.ingredients) ? recipe.ingredients : [],
       steps: Array.isArray(recipe.steps) ? recipe.steps : [],
-      source_url: String(recipe.source_url || '').trim()
+      source_url: String(recipe.source_url || '').trim(),
+      servings: cleanServings(recipe.servings),
+      servings_estimated: Boolean(recipe.servings_estimated) && Boolean(cleanServings(recipe.servings)),
+      course: COURSES.some(([value]) => value === recipe.course) ? recipe.course : null
     };
+  }
+
+  const COURSES = [['entree', 'Entree'], ['side', 'Side'], ['app', 'App'], ['dessert', 'Dessert']];
+
+  function cleanServings(value) {
+    const n = Math.round(Number(value));
+    return Number.isFinite(n) && n >= 1 ? Math.min(200, n) : null;
+  }
+
+  // Reads the first number from a yield like "Serves: 6-8" or "4 servings".
+  function servingsFromText(text) {
+    const match = String(text || '').match(/(\d+)/);
+    return match ? cleanServings(match[1]) : null;
+  }
+
+  function servingsFromTags(tags) {
+    const tag = (tags || []).find(t => /^Serves:\s*\d/i.test(String(t)));
+    return tag ? servingsFromText(tag) : null;
   }
 
   function pushModal(next) {
@@ -114,7 +137,10 @@
       type: meal.type,
       recipe_id: meal.recipe_id || null,
       label: String(meal.label || ''),
-      notes: String(meal.notes || '')
+      notes: String(meal.notes || ''),
+      servings: meal.type === 'meal' ? cleanServings(meal.servings) : null,
+      leftover_days: meal.type === 'meal' ? Math.max(0, Math.min(3, Number(meal.leftover_days) || 0)) : 0,
+      source_meal_id: meal.type === 'leftover' ? (meal.source_meal_id || null) : null
     };
   }
 
@@ -330,7 +356,8 @@
       return {
         recipes: this.read('recipes'),
         meals: this.read('meals'),
-        groceries: this.read('groceries')
+        groceries: this.read('groceries'),
+        ingredientLines: this.read('ingredients')
       };
     }
     async saveRecipe(recipe) {
@@ -351,6 +378,25 @@
     async deleteRecipe(recipeId) {
       this.write('meals', this.read('meals').filter(m => m.recipe_id !== recipeId));
       this.write('recipes', this.read('recipes').filter(r => r.id !== recipeId));
+      this.write('ingredients', this.read('ingredients').filter(l => l.recipe_id !== recipeId));
+    }
+    async replaceIngredientLines(recipeId, lines) {
+      const kept = this.read('ingredients').filter(l => l.recipe_id !== recipeId);
+      this.write('ingredients', [...kept, ...lines.map(l => ({ ...l, id: uid(), recipe_id: recipeId }))]);
+    }
+    async saveRecipeFields(recipeId, fields) {
+      const recipes = this.read('recipes');
+      const index = recipes.findIndex(r => r.id === recipeId);
+      if (index >= 0) { recipes[index] = { ...recipes[index], ...fields }; this.write('recipes', recipes); }
+    }
+    async clearUnsure(recipeId) {
+      this.write('ingredients', this.read('ingredients').map(l => (l.recipe_id === recipeId ? { ...l, unsure: false } : l)));
+    }
+    async loadPrefs() {
+      return this.read('prefs', {});
+    }
+    async savePrefs(prefs) {
+      this.write('prefs', prefs);
     }
     async upsertMeal(meal) {
       const meals = this.read('meals');
@@ -361,7 +407,10 @@
       return next;
     }
     async deleteMeal(mealDate) {
-      this.write('meals', this.read('meals').filter(m => m.meal_date !== mealDate));
+      const meals = this.read('meals');
+      const gone = meals.find(m => m.meal_date === mealDate);
+      // Same as the database: removing a cook night removes its Leftovers Nights.
+      this.write('meals', meals.filter(m => m.meal_date !== mealDate && !(gone && m.source_meal_id === gone.id)));
     }
     async replaceAutoGroceries(start, generated) {
       const all = this.read('groceries');
@@ -387,7 +436,7 @@
       this.write('groceries', this.read('groceries').filter(g => g.week_start !== start));
     }
     async reset() {
-      ['recipes', 'meals', 'groceries'].forEach(k => localStorage.removeItem(this.prefix + k));
+      ['recipes', 'meals', 'groceries', 'ingredients'].forEach(k => localStorage.removeItem(this.prefix + k));
       await this.initialize();
     }
   }
@@ -411,14 +460,59 @@
       }
     }
     async loadAll() {
-      const [recipesRes, mealsRes, groceriesRes] = await Promise.all([
+      const [recipesRes, mealsRes, groceriesRes, ingredientLines] = await Promise.all([
         this.client.from('recipes').select('*').order('created_at', { ascending: true }),
         this.client.from('weekly_meals').select('*').order('meal_date', { ascending: true }),
-        this.client.from('grocery_items').select('*').order('created_at', { ascending: true })
+        this.client.from('grocery_items').select('*').order('created_at', { ascending: true }),
+        this.loadIngredientLines()
       ]);
       const error = recipesRes.error || mealsRes.error || groceriesRes.error;
       if (error) throw error;
-      return { recipes: recipesRes.data, meals: mealsRes.data, groceries: groceriesRes.data };
+      return { recipes: recipesRes.data, meals: mealsRes.data, groceries: groceriesRes.data, ingredientLines };
+    }
+    // Supabase returns at most 1,000 rows per request, so read the lines in pages.
+    async loadIngredientLines() {
+      const rows = [];
+      for (let from = 0; ; from += 1000) {
+        const { data, error } = await this.client.from('recipe_ingredients')
+          .select('id,recipe_id,position,raw,qty,unit,item,prep,category,unsure')
+          .order('recipe_id', { ascending: true }).order('position', { ascending: true })
+          .range(from, from + 999);
+        if (error) {
+          // Before the Phase 2 SQL is run the table does not exist; the app still works.
+          if (/recipe_ingredients/i.test(error.message || '')) return [];
+          throw error;
+        }
+        rows.push(...(data || []));
+        if (!data || data.length < 1000) return rows;
+      }
+    }
+    async replaceIngredientLines(recipeId, lines) {
+      const { error: deleteError } = await this.client.from('recipe_ingredients').delete().eq('recipe_id', recipeId);
+      if (deleteError) throw deleteError;
+      if (!lines.length) return;
+      const rows = lines.map(l => ({
+        recipe_id: recipeId, household_id: this.householdId, position: l.position, raw: l.raw,
+        qty: l.qty, unit: l.unit, item: l.item, prep: l.prep, category: l.category, unsure: l.unsure
+      }));
+      const { error } = await this.client.from('recipe_ingredients').insert(rows);
+      if (error) throw error;
+    }
+    async saveRecipeFields(recipeId, fields) {
+      const { error } = await this.client.from('recipes').update(fields).eq('id', recipeId);
+      if (error) throw error;
+    }
+    async clearUnsure(recipeId) {
+      const { error } = await this.client.from('recipe_ingredients').update({ unsure: false }).eq('recipe_id', recipeId).eq('unsure', true);
+      if (error) throw error;
+    }
+    async loadPrefs() {
+      const { data } = await this.client.from('household_members').select('prefs').eq('user_id', this.user.id).maybeSingle();
+      return data?.prefs || {};
+    }
+    async savePrefs(prefs) {
+      const { error } = await this.client.from('household_members').update({ prefs }).eq('user_id', this.user.id);
+      if (error) throw error;
     }
     async saveRecipe(recipe) {
       const payload = cleanRecipePayload(recipe);
@@ -583,6 +677,7 @@
       .on('postgres_changes', { event: '*', schema: 'public', table: 'recipes', filter: `household_id=eq.${householdId}` }, scheduleReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'weekly_meals', filter: `household_id=eq.${householdId}` }, scheduleReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'grocery_items', filter: `household_id=eq.${householdId}` }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'recipe_ingredients', filter: `household_id=eq.${householdId}` }, scheduleReload)
       .subscribe();
   }
 
@@ -590,8 +685,14 @@
     clearTimeout(reloadTimer);
     reloadTimer = setTimeout(async () => {
       await reloadData();
-      render();
+      renderUnlessEditing();
     }, 250);
+  }
+
+  // Background updates should not wipe out a recipe form someone is typing in.
+  function renderUnlessEditing() {
+    if (state.modal?.type === 'addRecipe' && state.modal.mode !== 'import') return;
+    render();
   }
 
   async function reloadData() {
@@ -600,10 +701,166 @@
     state.recipes = data.recipes || [];
     state.meals = data.meals || [];
     state.groceries = data.groceries || [];
+    state.ingredientLines = data.ingredientLines || [];
     if (sb && state.member) {
       const { data: members } = await sb.from('household_members').select('household_id,user_id,display_name,email');
       if (members) state.members = members;
     }
+    if (!prefsLoaded) {
+      prefsLoaded = true;
+      try { state.prefs = window.MealzUnits.cleanPrefs(await store.loadPrefs()); } catch { /* keep defaults */ }
+    }
+    queueConversions();
+  }
+
+  let prefsLoaded = false;
+
+  // ---- Structured ingredients -------------------------------------------------
+  // Each recipe's ingredient text is sent to /api/convert-ingredients once, and
+  // again whenever the text changes. ingredients_hash records which text the
+  // structured lines were made from.
+
+  const conversion = { queue: [], running: false, failed: new Set(), disabled: '', total: 0, done: 0 };
+
+  function recipeLineTexts(recipe) {
+    return (recipe?.ingredients || [])
+      .map(i => `${String(i?.amount || '').trim()} ${String(i?.name || '').trim()}`.trim())
+      .filter(Boolean);
+  }
+
+  function ingredientsHash(recipe) {
+    const text = recipeLineTexts(recipe).join('\n');
+    let h = 5381;
+    for (let i = 0; i < text.length; i += 1) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0;
+    return `v1:${h.toString(16)}:${text.length}`;
+  }
+
+  function isConverted(recipe) {
+    return Boolean(recipe) && recipe.ingredients_hash === ingredientsHash(recipe);
+  }
+
+  function linesFor(recipeId) {
+    return state.ingredientLines.filter(l => l.recipe_id === recipeId).sort((a, b) => a.position - b.position);
+  }
+
+  function unsureCount(recipe) {
+    return isConverted(recipe) ? linesFor(recipe.id).filter(l => l.unsure).length : 0;
+  }
+
+  function recipeNeedsLook(recipe) {
+    return unsureCount(recipe) > 0 || Boolean(recipe?.servings_estimated);
+  }
+
+  function queueConversions() {
+    if (conversion.disabled || !store) return;
+    // Skip quietly until the Phase 2 database update has added the new columns.
+    if (state.recipes.length && !('ingredients_hash' in state.recipes[0]) && sharedMode) return;
+    const waiting = state.recipes.filter(r => !isConverted(r) && !conversion.failed.has(r.id) && !conversion.queue.includes(r.id));
+    if (!waiting.length) return;
+    if (!conversion.running) { conversion.total = 0; conversion.done = 0; }
+    conversion.queue.push(...waiting.map(r => r.id));
+    conversion.total += waiting.length;
+    if (!conversion.running) runConversionQueue();
+  }
+
+  async function runConversionQueue() {
+    conversion.running = true;
+    const worker = async () => {
+      while (conversion.queue.length && !conversion.disabled) {
+        const id = conversion.queue.shift();
+        const recipe = recipeById(id);
+        if (recipe && !isConverted(recipe)) {
+          try {
+            await convertRecipe(recipe);
+          } catch (error) {
+            conversion.failed.add(id);
+            if (error.stopAll) conversion.disabled = error.message;
+            else console.warn('Ingredient conversion failed for', recipe.name, error.message);
+          }
+        }
+        conversion.done += 1;
+        if (state.view === 'more' && !state.modal) render();
+      }
+    };
+    try {
+      await Promise.all([worker(), worker()]);
+    } finally {
+      conversion.running = false;
+      conversion.queue = [];
+    }
+    await reloadData();
+    renderUnlessEditing();
+  }
+
+  async function convertRecipe(recipe) {
+    const hash = ingredientsHash(recipe);
+    const lines = recipeLineTexts(recipe);
+    if (!lines.length) {
+      await store.replaceIngredientLines(recipe.id, []);
+      await store.saveRecipeFields(recipe.id, { ingredients_hash: hash, needs_review: false });
+      return;
+    }
+    const headers = { 'Content-Type': 'application/json' };
+    if (sharedMode) {
+      const { data } = await sb.auth.getSession();
+      if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`;
+    }
+    let response;
+    try {
+      response = await fetch('/api/convert-ingredients', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ recipe: {
+          name: recipe.name,
+          lines,
+          steps: (recipe.steps || []).slice(0, 12),
+          servings: cleanServings(recipe.servings),
+          course: recipe.course || null
+        } })
+      });
+    } catch (error) {
+      throw Object.assign(new Error('Ingredient conversion is offline right now.'), { stopAll: true });
+    }
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const offline = [404, 405, 501].includes(response.status);
+      const stopAll = offline || response.status === 401 || result.code === 'NO_KEY';
+      const message = offline
+        ? 'Ingredient conversion runs on the live site.'
+        : (result.error || `Conversion failed (${response.status}).`);
+      throw Object.assign(new Error(message), { stopAll });
+    }
+    // If the recipe was edited while this was running, leave it for the next pass.
+    if (ingredientsHash(recipeById(recipe.id) || recipe) !== hash) return;
+    const structured = (result.lines || []).map(l => ({
+      position: l.position, raw: l.raw, qty: l.qty, unit: l.unit || '', item: l.item || '',
+      prep: l.prep || '', category: normalizeCategory(l.category), unsure: Boolean(l.unsure)
+    }));
+    await store.replaceIngredientLines(recipe.id, structured);
+    const fields = { ingredients_hash: hash, needs_review: structured.some(l => l.unsure) };
+    if (!cleanServings(recipe.servings) && cleanServings(result.servings)) {
+      fields.servings = cleanServings(result.servings);
+      fields.servings_estimated = Boolean(result.servings_estimated);
+    }
+    if (!recipe.course && result.course) fields.course = result.course;
+    await store.saveRecipeFields(recipe.id, fields);
+    Object.assign(recipe, fields);
+  }
+
+  async function markRecipeChecked(recipeId) {
+    const recipe = recipeById(recipeId);
+    if (!recipe) return;
+    await store.clearUnsure(recipeId);
+    await store.saveRecipeFields(recipeId, { needs_review: false, servings_estimated: false });
+    await reloadData();
+    render();
+    toast('Marked as checked');
+  }
+
+  async function savePrefs(next) {
+    state.prefs = window.MealzUnits.cleanPrefs({ ...state.prefs, ...next });
+    render();
+    await store.savePrefs(state.prefs);
   }
 
   function renderAuth(setupError = false) {
@@ -730,6 +987,44 @@
     return state.recipes.find(r => r.id === id);
   }
 
+  // ---- Servings and leftovers ----------------------------------------------
+  // A recipe's own yield, or 4 when we do not know it.
+  function recipeYield(recipe) {
+    return cleanServings(recipe?.servings) || 4;
+  }
+
+  // Mealz never plans fewer than 4 servings.
+  function baseServings(recipe) {
+    return Math.max(4, recipeYield(recipe));
+  }
+
+  function linkedLeftovers(meal) {
+    if (!meal?.id) return [];
+    return state.meals.filter(m => m.type === 'leftover' && m.source_meal_id === meal.id)
+      .sort((a, b) => a.meal_date.localeCompare(b.meal_date));
+  }
+
+  function defaultServings(recipe, nights) {
+    return baseServings(recipe) + 4 * nights;
+  }
+
+  // Total servings to cook on a cook night.
+  function plannedServings(meal, recipe) {
+    return cleanServings(meal?.servings) || defaultServings(recipe, linkedLeftovers(meal).length);
+  }
+
+  function hasExtra(meal, recipe) {
+    return linkedLeftovers(meal).length > 0 || plannedServings(meal, recipe) !== baseServings(recipe);
+  }
+
+  function weekdayName(key, style = 'long') {
+    return parseLocalDate(key).toLocaleDateString(undefined, { weekday: style });
+  }
+
+  function followingDays(key, count) {
+    return Array.from({ length: count }, (_, i) => dateKey(addDays(parseLocalDate(key), i + 1)));
+  }
+
   const DEFAULT_DISH_TYPES = ['Chicken', 'Beef', 'Pork', 'Turkey', 'Seafood', 'Lamb', 'Vegetarian', 'Pasta', 'Soup', 'Other'];
 
   function dishTypeOf(recipe) {
@@ -773,9 +1068,13 @@
     if (meal.type === 'eatout') return { name: meal.label || 'Eating Out', meta: 'No groceries needed' };
     const recipe = recipeById(meal.recipe_id);
     const name = recipe?.name || meal.label || 'Meal';
-    if (meal.type === 'leftover') return { name: `Leftovers: ${name}`, meta: 'Easy night' };
+    if (meal.type === 'leftover') {
+      const source = meal.source_meal_id ? state.meals.find(m => m.id === meal.source_meal_id) : null;
+      return { name: `Leftovers: ${name}`, meta: source ? `From ${weekdayName(source.meal_date)} · nothing to buy` : 'Easy night' };
+    }
     const total = Number(recipe?.prep_minutes || 0) + Number(recipe?.cook_minutes || 0);
-    return { name, meta: `${total || '?'} min · ${recipe?.difficulty || 'Easy'}` };
+    const extra = recipe && hasExtra(meal, recipe) ? ` · ${plannedServings(meal, recipe)} servings` : '';
+    return { name, meta: `${total || '?'} min · ${recipe?.difficulty || 'Easy'}${extra}` };
   }
 
   function renderWeek() {
@@ -890,7 +1189,7 @@
         <span class="tile-art dish-${escapeHtml(String(type).replace(/[^a-z]/gi, ''))}">${dishIcon(recipe)}</span>
         <span class="tile-body">
           <span class="tile-name">${escapeHtml(recipe.name)}</span>
-          <span class="tile-meta">${escapeHtml(type)} · ${total || '?'} min${recipe.is_new ? ' · ✨' : ''}</span>
+          <span class="tile-meta">${escapeHtml(type)} · ${total || '?'} min${recipe.is_new ? ' · ✨' : ''}${recipeNeedsLook(recipe) ? ' <span class="flag" title="Mealz needs a quick check on this recipe">⚑</span>' : ''}</span>
         </span>
       </button>
       <button type="button" class="tile-fav" data-action="toggle-favorite" data-recipe-id="${recipe.id}" aria-label="Toggle favorite">${recipe.favorite ? '❤️' : '♡'}</button>
@@ -948,7 +1247,7 @@
     return `<div class="grocery-category"><h3>${escapeHtml(category)}</h3><div class="grocery-list">
       ${sorted.map(item => `<label class="grocery-item ${item.checked ? 'checked' : ''}">
         <input type="checkbox" data-action="toggle-grocery" data-id="${item.id}" ${item.checked ? 'checked' : ''} />
-        <span><span class="grocery-name">${escapeHtml(item.name)}</span>${item.amount ? `<span class="grocery-amount"> · ${escapeHtml(item.amount)}</span>` : ''}${item.manual ? '<span class="grocery-amount"> · added manually</span>' : ''}</span>
+        <span><span class="grocery-name">${escapeHtml(item.name)}</span>${groceryAmount(item) ? `<span class="grocery-amount"> · ${escapeHtml(groceryAmount(item))}</span>` : ''}${item.manual ? '<span class="grocery-amount"> · added manually</span>' : ''}</span>
         <button type="button" class="delete-item" data-action="delete-grocery" data-id="${item.id}" aria-label="Delete item">×</button>
       </label>`).join('')}
     </div></div>`;
@@ -960,6 +1259,8 @@
       <div class="more-list" style="margin-top:14px">
         <div class="more-row"><div><strong>${sharedMode ? `Signed in as ${escapeHtml(state.member?.display_name || state.user?.email || '')}` : 'Demo Mode'}</strong><span>${sharedMode ? escapeHtml(state.user?.email || 'Signed in') : 'Data is currently saved only on this device.'}</span></div><span>${sharedMode ? '☁' : '◉'}</span></div>
         ${sharedMode ? `<div class="more-row"><div><strong>Household</strong><span>${state.members.length > 1 ? escapeHtml(state.members.map(m => m.display_name || m.email).join(' and ')) + ' share everything.' : 'Waiting for Stephanie to create her account.'}</span></div><span>🏠</span></div>` : ''}
+        ${renderUnitSettings()}
+        ${renderIngredientStatus()}
         <div class="more-row"><div><strong>Recipe style</strong><span>Fast prep · healthy · lean protein · fresh vegetables · simple.</span></div><span>✓</span></div>
         <div class="more-row"><div><strong>Favorite flavors</strong><span>Mexican · Greek · Peruvian · similar weeknight meals.</span></div><span>✓</span></div>
         ${sharedMode ? '<div class="more-row"><div><strong>Account</strong><span>Mealz stays signed in on this device until you choose Sign Out.</span></div><button type="button" class="btn btn-outline btn-small" data-action="signout">Sign Out</button></div>' : '<div class="more-row"><div><strong>Reset demo</strong><span>Restore the sample recipes and clear local planning data.</span></div><button type="button" class="btn btn-outline btn-small" data-action="reset-demo">Reset</button></div>'}
@@ -968,11 +1269,33 @@
     <section class="panel"><h3 style="margin-top:0">Next upgrades</h3><p class="section-subtitle">Recipe Keeper bulk import is now built in. Prep-ahead mode and smarter “similar but new” suggestions are the next logical upgrades, using your growing Mealz history.</p></section>`;
   }
 
+  function renderUnitSettings() {
+    const p = state.prefs;
+    const option = (pref, value, label) => `<button type="button" class="seg-btn ${p[pref] === value ? 'active' : ''}" data-action="set-pref" data-pref="${pref}" data-value="${value}">${label}</button>`;
+    return `<div class="more-row more-row-stack"><div><strong>Amounts</strong><span>How numbers show on the grocery list and recipes. Just for you.</span></div>
+        <div class="seg">${option('numbers', 'fractions', '1 1/2')}${option('numbers', 'decimals', '1.5')}</div></div>
+      <div class="more-row more-row-stack"><div><strong>Weights</strong><span>${escapeHtml(window.MealzUnits.formatMeasure({ v: 0, vu: [], w: 24, c: {} }, p))} is how 1 1/2 pounds will show.</span></div>
+        <div class="seg">${option('weights', 'oz', 'Ounces')}${option('weights', 'lb_oz', 'Lb and oz')}${option('weights', 'lb', 'Pounds')}</div></div>`;
+  }
+
+  function renderIngredientStatus() {
+    const total = state.recipes.filter(r => recipeLineTexts(r).length).length;
+    if (!total) return '';
+    const done = state.recipes.filter(r => recipeLineTexts(r).length && isConverted(r)).length;
+    const toCheck = state.recipes.filter(recipeNeedsLook).length;
+    let text = `${done} of ${total} recipes are ready for the smart grocery list.`;
+    if (conversion.running) text = `Organizing ingredients: ${conversion.done} of ${conversion.total} done. You can keep using Mealz.`;
+    else if (conversion.disabled && done < total) text += ` ${conversion.disabled}`;
+    if (toCheck) text += ` ${toCheck} ${toCheck === 1 ? 'recipe needs' : 'recipes need'} a quick check (marked ⚑).`;
+    return `<div class="more-row"><div><strong>Ingredients</strong><span>${escapeHtml(text)}</span></div><span>${conversion.running ? '⏳' : done === total ? '✓' : '…'}</span></div>`;
+  }
+
   function renderModal() {
     if (state.modal.type === 'plan') return renderPlanModal();
     if (state.modal.type === 'mealNight') return renderMealNightSheet();
     if (state.modal.type === 'filter') return renderFilterSheet();
     if (state.modal.type === 'leftoverPrompt') return renderLeftoverPrompt();
+    if (state.modal.type === 'leftovers') return renderLeftoversSheet();
     if (state.modal.type === 'recipeDetail') return renderRecipeDetailModal();
     if (state.modal.type === 'addRecipe') return renderAddRecipeModal();
     if (state.modal.type === 'chooseDay') return renderChooseDayModal();
@@ -1094,8 +1417,11 @@
     const display = mealDisplay(meal);
     const type = mealClass(meal, recipe);
     const noteValue = state.modal.noteDraft != null ? state.modal.noteDraft : String(meal.notes || '');
-    const nextKey = dateKey(addDays(date, 1));
-    const nextTaken = Boolean(mealForDate(nextKey));
+    const source = meal.type === 'leftover' && meal.source_meal_id ? state.meals.find(m => m.id === meal.source_meal_id) : null;
+    const leftoverNights = meal.type === 'meal' ? linkedLeftovers(meal) : [];
+    const leftoverSummary = recipe && meal.type === 'meal' && hasExtra(meal, recipe)
+      ? `${plannedServings(meal, recipe)} servings${leftoverNights.length ? ` · ${leftoverNights.length} ${leftoverNights.length === 1 ? 'night' : 'nights'}` : ''}`
+      : 'Make extra';
 
     const plannedBy = memberName(meal.updated_by);
     const body = `
@@ -1120,7 +1446,8 @@
           ${recipe ? `<button type="button" class="tile" data-action="view-recipe" data-recipe-id="${recipe.id}"><span class="tile-icon">📖</span><strong>Recipe</strong></button>` : ''}
           ${recipe ? `<button type="button" class="tile" data-action="cook" data-recipe-id="${recipe.id}"><span class="tile-icon">👨‍🍳</span><strong>Cook</strong></button>` : ''}
           <button type="button" class="tile" data-action="plan-date" data-date="${key}"><span class="tile-icon">🔄</span><strong>Swap</strong></button>
-          ${recipe && meal.type === 'meal' ? `<button type="button" class="tile" data-action="leftovers-tomorrow" data-date="${key}" data-recipe-id="${recipe.id}" ${nextTaken ? 'disabled' : ''}><span class="tile-icon">🟡</span><strong>Leftovers</strong></button>` : ''}
+          ${recipe && meal.type === 'meal' ? `<button type="button" class="tile ${hasExtra(meal, recipe) ? 'tile-on' : ''}" data-action="open-leftovers" data-date="${key}"><span class="tile-icon">🟡</span><strong>Leftovers</strong><span>${escapeHtml(leftoverSummary)}</span></button>` : ''}
+          ${source ? `<button type="button" class="tile" data-action="open-meal" data-date="${source.meal_date}"><span class="tile-icon">🍳</span><strong>Cook Night</strong><span>${escapeHtml(weekdayName(source.meal_date))}</span></button>` : ''}
           <button type="button" class="tile tile-danger" data-action="clear-day"><span class="tile-icon">×</span><strong>Clear</strong></button>
         </div>
       </div>`;
@@ -1129,26 +1456,97 @@
 
   function renderLeftoverPrompt() {
     const recipe = recipeById(state.modal.recipeId);
-    const next = addDays(parseLocalDate(state.modal.date), 1);
-    const nextKey = dateKey(next);
-    const nextMeal = mealForDate(nextKey);
-    const body = `<div class="panel"><p style="margin-top:0">Make enough <strong>${escapeHtml(recipe?.name || 'food')}</strong> for tomorrow too?</p>
-      <div class="tile-grid"><button type="button" class="tile" data-action="add-leftover-next" ${nextMeal ? 'disabled' : ''}><span class="tile-icon">🟡</span><strong>Yes, ${next.toLocaleDateString(undefined, { weekday: 'long' })}</strong><span>${nextMeal ? 'That day already has a plan.' : 'Tomorrow becomes leftovers.'}</span></button><button type="button" class="tile" data-action="close-modal"><span class="tile-icon">↩</span><strong>No Thanks</strong><span>Just this one night.</span></button></div></div>`;
+    const body = `<div class="panel"><p style="margin-top:0">Make extra <strong>${escapeHtml(recipe?.name || 'food')}</strong> for lunches or another dinner?</p>
+      <div class="tile-grid"><button type="button" class="tile" data-action="open-leftovers" data-date="${state.modal.date}"><span class="tile-icon">🟡</span><strong>Add Leftovers</strong><span>Pick servings and nights.</span></button><button type="button" class="tile" data-action="close-modal"><span class="tile-icon">↩</span><strong>No Thanks</strong><span>Cook ${recipe ? baseServings(recipe) : 4} servings.</span></button></div></div>`;
     return modalShell('Plan leftovers?', 'This is the easiest way to stretch one dinner into two nights.', body);
+  }
+
+  function openLeftoversSheet(date) {
+    const meal = mealForDate(date);
+    const recipe = meal ? recipeById(meal.recipe_id) : null;
+    if (!meal || meal.type !== 'meal' || !recipe) return;
+    const existing = linkedLeftovers(meal).length;
+    const fromPrompt = state.modal?.type === 'leftoverPrompt';
+    const nights = fromPrompt ? 1 : existing;
+    const servings = fromPrompt ? defaultServings(recipe, 1) : plannedServings(meal, recipe);
+    const next = { type: 'leftovers', date, nights, servings };
+    if (state.modal?.type === 'mealNight') pushModal(next); else resetModals(next);
+  }
+
+  function renderLeftoversSheet() {
+    const { date, nights, servings } = state.modal;
+    const meal = mealForDate(date);
+    const recipe = meal ? recipeById(meal.recipe_id) : null;
+    if (!meal || !recipe) return '';
+    const linked = linkedLeftovers(meal);
+    const yieldText = cleanServings(recipe.servings)
+      ? `${escapeHtml(recipe.name)} makes ${recipeYield(recipe)} as written${recipe.servings_estimated ? ' (estimated)' : ''}.`
+      : `${escapeHtml(recipe.name)} has no servings listed, so Mealz treats it as 4.`;
+    const nightTiles = [0, 1, 2, 3].map(n => {
+      const days = followingDays(date, n);
+      const taken = days.filter(k => { const m = mealForDate(k); return m && m.source_meal_id !== meal.id; });
+      const label = n === 0 ? 'Lunch Only' : `${n} ${n === 1 ? 'Night' : 'Nights'}`;
+      const sub = n === 0 ? 'No dinners added'
+        : `${days.map(k => weekdayName(k, 'short')).join(', ')}${taken.length ? ` · ${taken.map(k => weekdayName(k, 'short')).join(', ')} has a plan` : ''}`;
+      return `<button type="button" class="tile ${nights === n ? 'tile-on' : ''}" data-action="leftover-nights" data-nights="${n}"><strong>${label}</strong><span>${escapeHtml(sub)}</span></button>`;
+    }).join('');
+    const body = `
+      <div class="panel leftover-intro"><p>${yieldText} Pick how many leftover dinners you want, then the total servings to cook.</p></div>
+      <div class="sheet-section">
+        <h3>Leftover dinners</h3>
+        <div class="tile-grid">${nightTiles}</div>
+      </div>
+      <div class="sheet-section">
+        <h3>Total servings to cook</h3>
+        <div class="stepper">
+          <button type="button" class="stepper-btn" data-action="servings-step" data-delta="-2" aria-label="Fewer servings" ${servings <= 4 ? 'disabled' : ''}>−</button>
+          <div class="stepper-value"><strong id="servings-value">${servings}</strong><span>servings</span></div>
+          <button type="button" class="stepper-btn" data-action="servings-step" data-delta="2" aria-label="More servings" ${servings >= 60 ? 'disabled' : ''}>+</button>
+        </div>
+        <p class="form-help centered">Never less than 4. Each leftover dinner adds 4. The grocery list buys for ${servings}.</p>
+      </div>
+      <div class="sheet-section note-actions">
+        <button type="button" class="btn btn-primary" data-action="save-leftovers">Save</button>
+        ${linked.length || hasExtra(meal, recipe) ? '<button type="button" class="btn btn-outline btn-danger-text" data-action="remove-leftovers">Remove Leftovers</button>' : '<button type="button" class="btn btn-outline" data-action="close-modal">Cancel</button>'}
+      </div>`;
+    return modalShell('Leftovers', `${weekdayName(date)} · ${recipe.name}`, body);
   }
 
   function renderRecipeDetailModal() {
     const recipe = recipeById(state.modal.recipeId);
     if (!recipe) return '';
     const total = Number(recipe.prep_minutes || 0) + Number(recipe.cook_minutes || 0);
+    const converted = isConverted(recipe);
+    const lines = converted ? linesFor(recipe.id) : [];
+    const unsure = lines.filter(l => l.unsure).length;
+    const course = (COURSES.find(([value]) => value === recipe.course) || [])[1];
+    const servingsText = cleanServings(recipe.servings) ? `Serves ${recipe.servings}${recipe.servings_estimated ? ' (estimated)' : ''}` : '';
+    const ingredientItems = lines.length
+      ? lines.map(l => {
+          if (!l.item) return `<li class="ingredient-heading">${escapeHtml(l.raw)}</li>`;
+          const amount = window.MealzUnits.formatLineAmount(l.qty, l.unit, state.prefs);
+          return `<li class="${l.unsure ? 'unsure' : ''}">${amount ? `<span class="ing-amount">${escapeHtml(amount)}</span> ` : ''}${escapeHtml(l.item)}${l.prep ? `<span class="ing-prep">, ${escapeHtml(l.prep)}</span>` : ''}${l.unsure ? ` <span class="flag" title="Mealz was not sure about this line">⚑</span><span class="ing-raw">Written as: ${escapeHtml(l.raw)}</span>` : ''}</li>`;
+        }).join('')
+      : (recipe.ingredients || []).map(i => `<li>${escapeHtml(i.amount || '')} ${escapeHtml(i.name || '')}</li>`).join('');
+    const needsLook = unsure > 0 || recipe.servings_estimated;
+    const lookParts = [
+      unsure ? `${unsure} ingredient ${unsure === 1 ? 'line' : 'lines'} marked ⚑` : '',
+      recipe.servings_estimated ? 'the servings, which were estimated' : ''
+    ].filter(Boolean).join(' and ');
+    const reviewBanner = needsLook
+      ? `<div class="review-banner"><div><strong>⚑ Quick check</strong><span>Mealz was not sure about ${escapeHtml(lookParts)}. If it looks right, tap Looks Right. To fix it, tap Edit.</span></div><button type="button" class="btn btn-small btn-outline" data-action="looks-right" data-recipe-id="${recipe.id}">Looks Right</button></div>`
+      : '';
+    const convertingNote = !converted && recipeLineTexts(recipe).length && !conversion.disabled
+      ? '<p class="form-help">Mealz is organizing these ingredients for the grocery list.</p>' : '';
     const body = `
+      ${reviewBanner}
       <div class="tile-grid">
         <button type="button" class="tile" data-action="cook" data-recipe-id="${recipe.id}"><span class="tile-icon">👨‍🍳</span><strong>Start Cooking</strong></button>
         <button type="button" class="tile" data-action="plan-recipe" data-recipe-id="${recipe.id}"><span class="tile-icon">📅</span><strong>Plan This</strong></button>
       </div>
       <div class="recipe-detail panel" style="margin-top:12px">
-        <div class="detail-meta">${escapeHtml(dishTypeOf(recipe))} · ${escapeHtml(recipe.cuisine || 'Dinner')} · ${total} min · ${escapeHtml(recipe.difficulty || 'Easy')}</div>
-        <h3>Ingredients</h3><ul class="ingredient-list">${(recipe.ingredients || []).map(i => `<li>${escapeHtml(i.amount || '')} ${escapeHtml(i.name || '')}</li>`).join('')}</ul>
+        <div class="detail-meta">${[dishTypeOf(recipe), course, recipe.cuisine || 'Dinner', `${total} min`, recipe.difficulty || 'Easy', servingsText].filter(Boolean).map(escapeHtml).join(' · ')}</div>
+        <h3>Ingredients</h3><ul class="ingredient-list">${ingredientItems}</ul>${convertingNote}
         <h3>Directions</h3><ol class="step-list">${(recipe.steps || []).map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ol>
         ${recipe.source_url ? `<p class="recipe-source-note">Saved cleanly in Mealz · <a class="source-link" href="${escapeHtml(recipe.source_url)}" target="_blank" rel="noopener">Source ↗</a></p>` : ''}
       </div>
@@ -1195,6 +1593,8 @@
       <div class="form-field"><label>Difficulty</label><select class="select-input" name="difficulty"><option ${imported.difficulty === 'Very Easy' ? 'selected' : ''}>Very Easy</option><option ${!imported.difficulty || imported.difficulty === 'Easy' ? 'selected' : ''}>Easy</option><option ${imported.difficulty === 'Moderate' ? 'selected' : ''}>Moderate</option></select></div>
       <div class="form-field"><label>Prep minutes</label><input class="text-input" name="prep_minutes" type="number" min="0" max="240" value="${escapeHtml(imported.prep_minutes ?? 15)}" /></div>
       <div class="form-field"><label>Cook minutes</label><input class="text-input" name="cook_minutes" type="number" min="0" max="360" value="${escapeHtml(imported.cook_minutes ?? 20)}" /></div>
+      <div class="form-field"><label>Servings</label><input class="text-input" name="servings" type="number" inputmode="numeric" min="1" max="200" placeholder="4" value="${escapeHtml(cleanServings(imported.servings) || servingsFromText(imported.yield) || servingsFromTags(imported.tags) || '')}" /><div class="form-help">What the recipe makes as written.</div></div>
+      <div class="form-field"><label>Course</label><select class="select-input" name="course">${COURSES.map(([value, label]) => `<option value="${value}" ${(imported.course || 'entree') === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
       <div class="form-field full"><label>Ingredients</label><textarea class="textarea-input" name="ingredients" placeholder="2 lb | chicken breast | Meat\n3 | bell peppers | Produce\n2 cups | rice | Pantry">${escapeHtml(ingredientText)}</textarea><div class="form-help">One per line: amount | ingredient | category</div></div>
       <div class="form-field full"><label>Directions</label><textarea class="textarea-input" name="steps" placeholder="Start the rice.\nSlice the chicken and vegetables.\nCook until done.">${escapeHtml(stepText)}</textarea><div class="form-help">One step per line.</div></div>
       ${mode === 'review' && sourceUrl ? `<input type="hidden" name="source_url" value="${escapeHtml(sourceUrl)}" />` : `<div class="form-field full"><label>Recipe source URL (optional)</label><input class="text-input" name="source_url" type="url" placeholder="https://…" value="${escapeHtml(sourceUrl)}" /></div>`}
@@ -1278,7 +1678,22 @@
       if (action === 'open-meal') { state.modal = { type: 'mealNight', date: button.dataset.date }; render(); return; }
       if (action === 'save-note') { await saveMealNote(); return; }
       if (action === 'note-to-grocery') { await sendNoteToGrocery(); return; }
-      if (action === 'leftovers-tomorrow') { await addLeftoverAfter(button.dataset.date, button.dataset.recipeId); return; }
+      if (action === 'open-leftovers') { openLeftoversSheet(button.dataset.date); render(); return; }
+      if (action === 'leftover-nights') {
+        const meal = mealForDate(state.modal.date);
+        const recipe = meal ? recipeById(meal.recipe_id) : null;
+        state.modal.nights = Number(button.dataset.nights) || 0;
+        state.modal.servings = defaultServings(recipe, state.modal.nights);
+        render(); return;
+      }
+      if (action === 'servings-step') {
+        state.modal.servings = Math.max(4, Math.min(60, state.modal.servings + Number(button.dataset.delta || 0)));
+        render(); return;
+      }
+      if (action === 'save-leftovers') { await saveLeftovers(); return; }
+      if (action === 'remove-leftovers') { await removeLeftovers(); return; }
+      if (action === 'looks-right') { await markRecipeChecked(button.dataset.recipeId); return; }
+      if (action === 'set-pref') { await savePrefs({ [button.dataset.pref]: button.dataset.value }); return; }
       if (action === 'open-filter') { pushModal({ type: 'filter', context: button.dataset.context || 'recipes' }); render(); return; }
       if (action === 'toggle-favorites-filter') { const f = filterFor(button.dataset.context); f.favoritesOnly = !f.favoritesOnly; render(); return; }
       if (action === 'filter-type') {
@@ -1303,9 +1718,8 @@
       if (action === 'modal-backdrop' && event.target === button) { resetModals(); render(); return; }
       if (action === 'plan-mode') { state.modal.mode = button.dataset.mode; render(); return; }
       if (action === 'set-eatout') { await setEatingOut(); return; }
-      if (action === 'clear-day') { await store.deleteMeal(state.modal.date); await reloadData(); resetModals(); render(); toast('Day cleared'); return; }
+      if (action === 'clear-day') { await clearDay(state.modal.date); return; }
       if (action === 'select-plan-recipe') { if (state.modal?.type === 'recommendWeek') { state.modal = { type: 'chooseDay', recipeId: button.dataset.recipeId }; render(); } else { await selectPlanRecipe(button.dataset.recipeId, button.dataset.leftover === 'true'); } return; }
-      if (action === 'add-leftover-next') { await addLeftoverNext(); return; }
       if (action === 'import-recipekeeper-confirm') { await importRecipeKeeperConfirmed(); return; }
       if (action === 'add-recipe') { state.modal = { type: 'addRecipe' }; render(); return; }
       if (action === 'manual-recipe') { state.modal = { type: 'addRecipe', mode: 'manual' }; render(); return; }
@@ -1386,7 +1800,7 @@
         }
         existingNames.add(nameKey);
         const dishType = raw.dish_type || dishTypeOf(raw);
-        recipes.push({ ...cleanRecipePayload(raw), tags: withDishTypeTag(raw.tags || [], dishType) });
+        recipes.push({ ...cleanRecipePayload({ ...raw, servings: raw.servings || servingsFromTags(raw.tags) }), tags: withDishTypeTag(raw.tags || [], dishType) });
       }
       state.modal = { type: 'recipeKeeperPreview', recipes, skipped };
       render();
@@ -1453,9 +1867,95 @@
     await initializeShared(data.user);
   }
 
+  // Before a day gets a new plan: if it is a cook night with Leftovers Nights,
+  // ask, then clear those nights. Returns false if the person says no.
+  async function prepareDateForReplace(date) {
+    const current = mealForDate(date);
+    if (!current || current.type !== 'meal') return true;
+    const linked = linkedLeftovers(current);
+    if (!linked.length) return true;
+    const days = linked.map(m => weekdayName(m.meal_date)).join(' and ');
+    if (!confirm(`${weekdayName(date)} has Leftovers Nights on ${days}. Changing it clears those too. Continue?`)) return false;
+    for (const m of linked) await store.deleteMeal(m.meal_date);
+    return true;
+  }
+
+  // Keeps leftover_days on a cook night equal to the nights linked to it.
+  async function syncLeftoverDays(sourceIds) {
+    for (const id of new Set(sourceIds.filter(Boolean))) {
+      const source = state.meals.find(m => m.id === id);
+      if (!source || source.type !== 'meal') continue;
+      const count = Math.min(3, linkedLeftovers(source).length);
+      if (Number(source.leftover_days || 0) !== count) await store.upsertMeal({ ...source, leftover_days: count });
+    }
+  }
+
+  async function clearDay(date) {
+    const meal = mealForDate(date);
+    if (!meal) { resetModals(); render(); return; }
+    const linked = meal.type === 'meal' ? linkedLeftovers(meal) : [];
+    if (linked.length && !confirm(`Clear ${weekdayName(date)} and its ${linked.length} Leftovers ${linked.length === 1 ? 'Night' : 'Nights'}?`)) return;
+    await store.deleteMeal(date);
+    await reloadData();
+    if (meal.source_meal_id) { await syncLeftoverDays([meal.source_meal_id]); await reloadData(); }
+    resetModals(); render(); toast(linked.length ? 'Day and leftovers cleared' : 'Day cleared');
+  }
+
   async function setEatingOut() {
-    await store.upsertMeal({ meal_date: state.modal.date, type: 'eatout', recipe_id: null, label: 'Eating Out' });
-    await reloadData(); resetModals(); render(); toast('Eating out added');
+    const date = state.modal.date;
+    const previous = mealForDate(date);
+    if (!(await prepareDateForReplace(date))) return;
+    await store.upsertMeal({ meal_date: date, type: 'eatout', recipe_id: null, label: 'Eating Out' });
+    await reloadData();
+    if (previous?.source_meal_id) { await syncLeftoverDays([previous.source_meal_id]); await reloadData(); }
+    resetModals(); render(); toast('Eating out added');
+  }
+
+  async function saveLeftovers() {
+    const { date, nights, servings } = state.modal;
+    const meal = mealForDate(date);
+    const recipe = meal ? recipeById(meal.recipe_id) : null;
+    if (!meal || !recipe) return;
+    const wanted = followingDays(date, nights);
+    const kept = [];
+    const otherSources = [];
+    for (const key of wanted) {
+      const existing = mealForDate(key);
+      if (existing && existing.source_meal_id !== meal.id) {
+        const what = mealDisplay(existing).name;
+        if (!confirm(`${weekdayName(key)} already has ${what}. Replace it with leftovers?`)) continue;
+        if (existing.type === 'meal' && linkedLeftovers(existing).length) {
+          if (!confirm(`${what} on ${weekdayName(key)} has its own Leftovers Nights. They will be cleared too. Continue?`)) continue;
+        }
+        if (existing.source_meal_id) otherSources.push(existing.source_meal_id);
+        await store.deleteMeal(key);
+      }
+      kept.push(key);
+    }
+    for (const old of linkedLeftovers(meal)) {
+      if (!kept.includes(old.meal_date)) await store.deleteMeal(old.meal_date);
+    }
+    await store.upsertMeal({ ...meal, servings, leftover_days: kept.length });
+    for (const key of kept) {
+      const existing = mealForDate(key);
+      await store.upsertMeal({
+        meal_date: key, type: 'leftover', recipe_id: recipe.id, label: recipe.name,
+        notes: existing?.source_meal_id === meal.id ? existing.notes || '' : '',
+        source_meal_id: meal.id
+      });
+    }
+    await reloadData();
+    if (otherSources.length) { await syncLeftoverDays(otherSources); await reloadData(); }
+    resetModals(); render();
+    toast(kept.length ? `Leftovers on ${kept.map(k => weekdayName(k)).join(' and ')} · ${servings} servings` : `Cooking ${servings} servings`);
+  }
+
+  async function removeLeftovers() {
+    const meal = mealForDate(state.modal.date);
+    if (!meal) return;
+    for (const old of linkedLeftovers(meal)) await store.deleteMeal(old.meal_date);
+    await store.upsertMeal({ ...meal, servings: null, leftover_days: 0 });
+    await reloadData(); resetModals(); render(); toast('Leftovers removed');
   }
 
   async function selectPlanRecipe(recipeId, leftover) {
@@ -1466,27 +1966,23 @@
 
   async function planRecipeOnDate(recipeId, date, offerLeftovers = true, leftover = false) {
     const recipe = recipeById(recipeId);
-    await store.upsertMeal({ meal_date: date, type: leftover ? 'leftover' : 'meal', recipe_id: recipeId, label: recipe?.name || '' });
+    const previous = mealForDate(date);
+    if (!(await prepareDateForReplace(date))) return;
+    // Picking "Leftovers" links the day to the most recent cook night of that recipe.
+    const source = leftover
+      ? state.meals.filter(m => m.type === 'meal' && m.recipe_id === recipeId && m.meal_date < date)
+        .sort((a, b) => b.meal_date.localeCompare(a.meal_date))[0]
+      : null;
+    await store.upsertMeal({
+      meal_date: date, type: leftover ? 'leftover' : 'meal', recipe_id: recipeId, label: recipe?.name || '',
+      source_meal_id: source?.id || null
+    });
     await reloadData();
+    const touched = [previous?.source_meal_id, source?.id];
+    if (touched.some(Boolean)) { await syncLeftoverDays(touched); await reloadData(); }
     if (offerLeftovers && !leftover) state.modal = { type: 'leftoverPrompt', date, recipeId };
     else resetModals();
     render();
-  }
-
-  async function addLeftoverNext() {
-    const nextKey = dateKey(addDays(parseLocalDate(state.modal.date), 1));
-    if (mealForDate(nextKey)) { resetModals(); render(); return; }
-    const recipe = recipeById(state.modal.recipeId);
-    await store.upsertMeal({ meal_date: nextKey, type: 'leftover', recipe_id: state.modal.recipeId, label: recipe?.name || '' });
-    await reloadData(); resetModals(); render(); toast('Tomorrow set to leftovers');
-  }
-
-  async function addLeftoverAfter(dateKeyValue, recipeId) {
-    const nextKey = dateKey(addDays(parseLocalDate(dateKeyValue), 1));
-    if (mealForDate(nextKey)) { toast('That day already has a plan'); return; }
-    const recipe = recipeById(recipeId);
-    await store.upsertMeal({ meal_date: nextKey, type: 'leftover', recipe_id: recipeId, label: recipe?.name || '' });
-    await reloadData(); resetModals(); render(); toast('Tomorrow set to leftovers');
   }
 
   function currentNoteDraft() {
@@ -1563,6 +2059,8 @@
     const prep = clampNumber(fd.get('prep_minutes'), 0, 240);
     const cook = clampNumber(fd.get('cook_minutes'), 0, 360);
     const dishType = String(fd.get('dish_type') || '').trim() || dishTypeOf(existing || state.modal?.imported || {});
+    const servings = cleanServings(fd.get('servings'));
+    const servingsEstimated = Boolean(existing?.servings_estimated) && servings === cleanServings(existing?.servings);
     const retainedTags = existing?.tags || state.modal?.imported?.tags || [];
     const recipe = {
       ...(existing || {}),
@@ -1574,12 +2072,14 @@
       rating: existing?.rating || '',
       is_new: existing ? existing.is_new : true,
       tags: withDishTypeTag([...new Set([...retainedTags.filter(tag => !/^dish:/i.test(String(tag)) && !['lean protein', 'fresh vegetables', 'quick'].includes(String(tag).toLowerCase())), ...inferTags(String(fd.get('ingredients') || ''), prep, cook)])], dishType),
-      ingredients, steps, source_url: String(fd.get('source_url') || '').trim()
+      ingredients, steps, source_url: String(fd.get('source_url') || '').trim(),
+      servings, servings_estimated: servingsEstimated,
+      course: String(fd.get('course') || '') || null
     };
     if (!recipe.name) return;
     const saved = await store.saveRecipe(recipe);
-    await reloadData();
     state.modal = { type: 'recipeDetail', recipeId: saved.id };
+    await reloadData();
     render();
     toast(existing ? 'Recipe updated' : 'Recipe saved');
   }
@@ -1596,6 +2096,8 @@
       rating: '',
       is_new: true,
       ingredients: (recipe.ingredients || []).map(i => ({ ...i })),
+      ingredients_hash: null,
+      needs_review: false,
       steps: [...(recipe.steps || [])],
       tags: [...(recipe.tags || [])]
     };
@@ -1648,31 +2150,67 @@
     await buildGroceryListForWeek(weekKey());
   }
 
-  async function buildGroceryListForWeek(start) {
-    const weekStartDate = parseLocalDate(start);
-    const end = dateKey(addDays(weekStartDate, 6));
-    const weekMeals = state.meals.filter(m => m.meal_date >= start && m.meal_date <= end && m.type === 'meal' && m.recipe_id);
-    const uniqueRecipeIds = [...new Set(weekMeals.map(m => m.recipe_id))];
-    const existing = state.groceries.filter(g => g.week_start === start);
-    const checkedByName = new Map(existing.map(i => [String(i.name).toLowerCase(), i.checked]));
+  // Cook nights only, each scaled from the recipe's yield to the servings planned.
+  // Leftovers Nights buy nothing. Amounts are added up with unit conversion.
+  function groceryItemsForWeek(start) {
+    const U = window.MealzUnits;
+    const end = dateKey(addDays(parseLocalDate(start), 6));
+    const cookNights = state.meals.filter(m => m.meal_date >= start && m.meal_date <= end && m.type === 'meal' && m.recipe_id);
     const map = new Map();
+    const entryFor = (name, category) => {
+      const key = name.toLowerCase();
+      if (!map.has(key)) map.set(key, { name, category, measure: U.emptyMeasure(), texts: [], structured: false });
+      return map.get(key);
+    };
 
-    uniqueRecipeIds.forEach(id => {
-      const recipe = recipeById(id);
-      (recipe?.ingredients || []).forEach(ingredient => {
+    cookNights.forEach(meal => {
+      const recipe = recipeById(meal.recipe_id);
+      if (!recipe) return;
+      const factor = plannedServings(meal, recipe) / recipeYield(recipe);
+      const lines = isConverted(recipe) ? linesFor(recipe.id) : [];
+      if (lines.length) {
+        lines.forEach(line => {
+          const name = String(line.item || '').trim();
+          if (!name) return;
+          const entry = entryFor(name, normalizeCategory(line.category));
+          entry.structured = true;
+          U.addToMeasure(entry.measure, line.qty == null ? null : Number(line.qty) * factor, line.unit);
+        });
+        return;
+      }
+      // Not converted yet: fall back to the original text, noting the scale.
+      (recipe.ingredients || []).forEach(ingredient => {
         const name = String(ingredient.name || '').trim();
         if (!name) return;
-        const key = name.toLowerCase();
+        const entry = entryFor(name, normalizeCategory(ingredient.category));
         const amount = String(ingredient.amount || '').trim();
-        if (!map.has(key)) map.set(key, { name, amount, category: normalizeCategory(ingredient.category), amounts: [] });
-        if (amount) map.get(key).amounts.push(amount);
+        const scale = Math.abs(factor - 1) > 0.01 ? ` (${U.formatNumber(factor, state.prefs.numbers)}x)` : '';
+        if (amount) entry.texts.push(`${amount}${scale}`);
       });
     });
 
-    const generated = [...map.values()].map(item => ({
+    return [...map.values()].map(entry => {
+      const measure = entry.structured && !U.isEmptyMeasure(entry.measure) ? entry.measure : null;
+      const parts = [measure ? U.formatMeasure(measure, state.prefs) : '', ...entry.texts].filter(Boolean);
+      return { name: entry.name, category: entry.category, measure, amount: parts.join(' + ') };
+    });
+  }
+
+  function groceryAmount(item) {
+    if (!item.measure) return item.amount || '';
+    const extra = String(item.amount || '').split(' + ').slice(1).join(' + ');
+    const main = window.MealzUnits.formatMeasure(item.measure, state.prefs);
+    return [main, extra].filter(Boolean).join(' + ');
+  }
+
+  async function buildGroceryListForWeek(start) {
+    const existing = state.groceries.filter(g => g.week_start === start);
+    const checkedByName = new Map(existing.map(i => [String(i.name).toLowerCase(), i.checked]));
+    const generated = groceryItemsForWeek(start).map(item => ({
       week_start: start,
       name: item.name,
-      amount: item.amounts.join(' + '),
+      amount: item.amount,
+      measure: item.measure,
       category: item.category,
       checked: checkedByName.get(item.name.toLowerCase()) || false,
       manual: false
