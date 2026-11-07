@@ -22,6 +22,8 @@
     meals: [],
     groceries: [],
     user: null,
+    member: null,
+    members: [],
     modal: null,
     recipeSearch: '',
     planSearch: '',
@@ -391,15 +393,19 @@
   }
 
   class SupabaseStore {
-    constructor(client, user) {
+    constructor(client, user, member) {
       this.client = client;
       this.user = user;
+      this.householdId = member.household_id;
+    }
+    own(row) {
+      return { ...row, user_id: this.user.id, household_id: this.householdId };
     }
     async initialize() {
       const { data, error } = await this.client.from('recipes').select('id').limit(1);
       if (error) throw error;
       if (!data.length) {
-        const rows = sampleRecipes().map(r => ({ ...r, user_id: this.user.id }));
+        const rows = sampleRecipes().map(r => this.own(r));
         const { error: insertError } = await this.client.from('recipes').insert(rows);
         if (insertError) throw insertError;
       }
@@ -415,20 +421,20 @@
       return { recipes: recipesRes.data, meals: mealsRes.data, groceries: groceriesRes.data };
     }
     async saveRecipe(recipe) {
-      const payload = { ...cleanRecipePayload(recipe), user_id: this.user.id };
+      const payload = cleanRecipePayload(recipe);
       if (recipe.id) {
         const { data, error } = await this.client.from('recipes').update(payload).eq('id', recipe.id).select().single();
         if (error) throw error;
         return data;
       }
-      const { data, error } = await this.client.from('recipes').insert(payload).select().single();
+      const { data, error } = await this.client.from('recipes').insert(this.own(payload)).select().single();
       if (error) throw error;
       return data;
     }
     async saveRecipes(items) {
       const added = [];
       for (let i = 0; i < items.length; i += 50) {
-        const rows = items.slice(i, i + 50).map(recipe => ({ ...cleanRecipePayload(recipe), user_id: this.user.id }));
+        const rows = items.slice(i, i + 50).map(recipe => this.own(cleanRecipePayload(recipe)));
         const { data, error } = await this.client.from('recipes').insert(rows).select();
         if (error) throw error;
         added.push(...(data || []));
@@ -442,10 +448,10 @@
       if (error) throw error;
     }
     async upsertMeal(meal) {
-      const payload = { ...cleanMealPayload(meal), user_id: this.user.id };
+      const payload = { ...cleanMealPayload(meal), household_id: this.householdId };
       delete payload.id;
       const { data, error } = await this.client.from('weekly_meals')
-        .upsert(payload, { onConflict: 'user_id,meal_date' }).select().single();
+        .upsert(payload, { onConflict: 'household_id,meal_date' }).select().single();
       if (error) throw error;
       return data;
     }
@@ -458,14 +464,16 @@
         .delete().eq('week_start', start).eq('manual', false);
       if (deleteError) throw deleteError;
       if (generated.length) {
-        const rows = generated.map(g => ({ ...g, user_id: this.user.id }));
+        const rows = generated.map(g => this.own(g));
         const { error } = await this.client.from('grocery_items').insert(rows);
         if (error) throw error;
       }
     }
     async saveGrocery(item) {
-      const payload = { ...item, user_id: this.user.id };
+      const payload = item.id ? { ...item } : this.own(item);
       delete payload.created_at;
+      delete payload.updated_at;
+      delete payload.updated_by;
       if (item.id) {
         const { data, error } = await this.client.from('grocery_items').update(payload).eq('id', item.id).select().single();
         if (error) throw error;
@@ -517,28 +525,64 @@
     }
   }
 
+  let initializing = false;
+
   async function initializeShared(user) {
+    if (initializing) return;
+    initializing = true;
     state.user = user;
-    store = new SupabaseStore(sb, user);
     try {
+      const member = await loadMembership(user);
+      if (!member) {
+        await sb.auth.signOut();
+        state.user = null;
+        state.loading = false;
+        state.authMessage = '';
+        state.authError = `${user.email} isn't part of a Mealz household yet. Ask Greg to add this email, then sign in again.`;
+        renderAuth();
+        return;
+      }
+      state.member = member;
+      store = new SupabaseStore(sb, user, member);
       await store.initialize();
       await reloadData();
-      startRealtime(user.id);
+      startRealtime(member.household_id);
       state.loading = false;
       render();
     } catch (error) {
       state.loading = false;
       state.authError = `Shared setup needs attention: ${error.message}`;
       renderAuth(true);
+    } finally {
+      initializing = false;
     }
   }
 
-  function startRealtime(userId) {
+  // Joins the household if this email was invited, then loads who is in it.
+  async function loadMembership(user) {
+    const claim = await sb.rpc('claim_household_invite');
+    if (claim.error) {
+      const missing = /claim_household_invite|function/i.test(claim.error.message || '');
+      throw new Error(missing ? 'the Phase 1 database update (supabase-v7-phase1.sql) has not been run yet.' : claim.error.message);
+    }
+    const { data, error } = await sb.from('household_members').select('household_id,user_id,display_name,email');
+    if (error) throw error;
+    state.members = data || [];
+    return state.members.find(m => m.user_id === user.id) || null;
+  }
+
+  function memberName(userId) {
+    if (!userId) return '';
+    const member = state.members.find(m => m.user_id === userId);
+    return member ? (member.display_name || member.email || '') : '';
+  }
+
+  function startRealtime(householdId) {
     if (!sb || realtimeChannel) return;
-    realtimeChannel = sb.channel(`mealz-${userId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'recipes', filter: `user_id=eq.${userId}` }, scheduleReload)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'weekly_meals', filter: `user_id=eq.${userId}` }, scheduleReload)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'grocery_items', filter: `user_id=eq.${userId}` }, scheduleReload)
+    realtimeChannel = sb.channel(`mealz-${householdId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'recipes', filter: `household_id=eq.${householdId}` }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'weekly_meals', filter: `household_id=eq.${householdId}` }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'grocery_items', filter: `household_id=eq.${householdId}` }, scheduleReload)
       .subscribe();
   }
 
@@ -556,6 +600,10 @@
     state.recipes = data.recipes || [];
     state.meals = data.meals || [];
     state.groceries = data.groceries || [];
+    if (sb && state.member) {
+      const { data: members } = await sb.from('household_members').select('household_id,user_id,display_name,email');
+      if (members) state.members = members;
+    }
   }
 
   function renderAuth(setupError = false) {
@@ -564,7 +612,7 @@
         <section class="auth-card">
           <div class="auth-logo">🍽</div>
           <h1>Mealz</h1>
-          <p>One shared login for the two of you. Sign in with the same account on both phones and your week, recipes, and grocery list stay together.</p>
+          <p>Each of you signs in with your own email. Your week, recipes, and grocery list are shared between you.</p>
           ${setupError ? `<div class="error-box">${escapeHtml(state.authError)}</div>` : ''}
           ${state.authError && !setupError ? `<div class="error-box">${escapeHtml(state.authError)}</div>` : ''}
           ${state.authMessage ? `<div class="success-box">${escapeHtml(state.authMessage)}</div>` : ''}
@@ -573,10 +621,10 @@
             <input class="text-input" name="password" type="password" autocomplete="current-password" placeholder="Password" minlength="6" required />
             <div class="auth-actions">
               <button class="btn btn-primary btn-wide" type="submit" data-auth-action="signin">Sign In</button>
-              <button class="btn btn-outline btn-wide" type="button" data-action="signup">Create Shared Account</button>
+              <button class="btn btn-outline btn-wide" type="button" data-action="signup">Create Account</button>
             </div>
           </form>
-          <p style="font-size:12px;margin-bottom:0">Use one household email/password on both devices. You can change this to separate profiles later if you ever want them.</p>
+          <p style="font-size:12px;margin-bottom:0">New to Mealz? Tap Create Account using the email Greg invited. You'll join the household as soon as you sign in.</p>
         </section>
       </main>`;
   }
@@ -910,7 +958,8 @@
     return `<section class="panel">
       <h2 class="section-title">More</h2><p class="section-subtitle">Keep the settings out of the way.</p>
       <div class="more-list" style="margin-top:14px">
-        <div class="more-row"><div><strong>${sharedMode ? 'Shared Household' : 'Demo Mode'}</strong><span>${sharedMode ? escapeHtml(state.user?.email || 'Signed in') : 'Data is currently saved only on this device.'}</span></div><span>${sharedMode ? '☁' : '◉'}</span></div>
+        <div class="more-row"><div><strong>${sharedMode ? `Signed in as ${escapeHtml(state.member?.display_name || state.user?.email || '')}` : 'Demo Mode'}</strong><span>${sharedMode ? escapeHtml(state.user?.email || 'Signed in') : 'Data is currently saved only on this device.'}</span></div><span>${sharedMode ? '☁' : '◉'}</span></div>
+        ${sharedMode ? `<div class="more-row"><div><strong>Household</strong><span>${state.members.length > 1 ? escapeHtml(state.members.map(m => m.display_name || m.email).join(' and ')) + ' share everything.' : 'Waiting for Stephanie to create her account.'}</span></div><span>🏠</span></div>` : ''}
         <div class="more-row"><div><strong>Recipe style</strong><span>Fast prep · healthy · lean protein · fresh vegetables · simple.</span></div><span>✓</span></div>
         <div class="more-row"><div><strong>Favorite flavors</strong><span>Mexican · Greek · Peruvian · similar weeknight meals.</span></div><span>✓</span></div>
         ${sharedMode ? '<div class="more-row"><div><strong>Account</strong><span>Mealz stays signed in on this device until you choose Sign Out.</span></div><button type="button" class="btn btn-outline btn-small" data-action="signout">Sign Out</button></div>' : '<div class="more-row"><div><strong>Reset demo</strong><span>Restore the sample recipes and clear local planning data.</span></div><button type="button" class="btn btn-outline btn-small" data-action="reset-demo">Reset</button></div>'}
@@ -1048,10 +1097,12 @@
     const nextKey = dateKey(addDays(date, 1));
     const nextTaken = Boolean(mealForDate(nextKey));
 
+    const plannedBy = memberName(meal.updated_by);
     const body = `
       <div class="meal-hero type-${type}">
         <strong>${escapeHtml(display.name)}</strong>
         <span>${escapeHtml(display.meta)}</span>
+        ${plannedBy && state.members.length > 1 ? `<span class="meal-by">Planned by ${escapeHtml(plannedBy)}</span>` : ''}
       </div>
       <div class="sheet-section">
         <h3>Notes for this night</h3>
@@ -1282,7 +1333,7 @@
       if (action === 'close-cook') { state.cook = null; render(); return; }
       if (action === 'rate') { await rateRecipe(button.dataset.rating); return; }
       if (action === 'reset-demo') { if (confirm('Reset Demo Mode and restore the starter recipes?')) { await store.reset(); state.weekStart = startOfWeek(new Date()); await reloadData(); render(); toast('Demo reset'); } return; }
-      if (action === 'signout') { if (realtimeChannel) { await sb.removeChannel(realtimeChannel); realtimeChannel = null; } await sb.auth.signOut(); state.user = null; state.authMessage = ''; state.authError = ''; renderAuth(); return; }
+      if (action === 'signout') { if (realtimeChannel) { await sb.removeChannel(realtimeChannel); realtimeChannel = null; } await sb.auth.signOut(); state.user = null; state.member = null; state.members = []; state.authMessage = ''; state.authError = ''; renderAuth(); return; }
       if (action === 'signup') { await authAction('signup'); return; }
     } catch (error) {
       console.error(error);
@@ -1391,7 +1442,7 @@
       const { data, error } = await sb.auth.signUp({ email, password });
       if (error) { state.authError = error.message; renderAuth(); return; }
       if (!data.session) {
-        state.authMessage = 'Account created. Check the email for a confirmation link, then sign in on both phones.';
+        state.authMessage = 'Account created. Check your email for a confirmation link, then come back and sign in.';
         renderAuth(); return;
       }
       await initializeShared(data.user);
