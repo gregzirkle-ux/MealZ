@@ -1,8 +1,41 @@
-# Mealz V6
+# Mealz V7
 
 A shared dinner planner and recipe keeper built for phones first.
 
 **Main loop:** Plan the week, pick a recipe, add notes, shop, cook.
+
+## V7 Phase 1: Two logins, one household
+
+Greg and Stephanie now each sign in with their own email and share the same recipes, week, and grocery list.
+
+### What changed
+1. New household tables. The existing Mealz account becomes Greg's login, and stephanie.strecker@gmail.com is invited.
+2. Every recipe, meal, and grocery row now belongs to the household instead of one login.
+3. Mealz records who last changed each row. The meal sheet shows "Planned by Greg" or "Planned by Stephanie".
+4. The sign in screen says Create Account instead of Create Shared Account. An email that was never invited gets a clear message and is signed back out.
+5. More shows who is signed in and who is in the household.
+
+### Installing Phase 1
+1. In Supabase, SQL Editor, run `supabase-v7-phase1.sql` once. Do this before deploying the app files.
+2. Replace `app.js`, `styles.css`, and `README.md`, and add `supabase-v7-phase1.sql`.
+3. Commit and let Vercel redeploy, then refresh Mealz on Greg's phone. Greg stays signed in.
+4. Stephanie opens Mealz, taps Create Account with stephanie.strecker@gmail.com, confirms the email if Supabase sends one, then signs in.
+
+## V7 Phase 0: Keep alive
+
+Supabase pauses free projects that go quiet for a week. Mealz now pings its own database once a day so that never happens.
+
+### What changed
+`api/keep-alive.js` is a small Vercel function that reads one row from a new `keep_alive` table. `vercel.json` schedules it every day at 11:00 UTC (6 or 7 AM Charlotte time). It reuses the Supabase address and public key already in `config.js`, so there is nothing new to set up in Vercel.
+
+### Installing Phase 0
+1. In Supabase, SQL Editor, run `supabase-v7-phase0.sql` once.
+2. Add `api/keep-alive.js` and `supabase-v7-phase0.sql`, and replace `vercel.json` and `README.md`.
+3. Leave `config.js` alone.
+4. Commit and let Vercel redeploy.
+5. Check it: open `/api/keep-alive` on your Mealz site. You should see `"ok":true`. In Vercel, Settings, Cron Jobs should list the job.
+
+No app screens change in Phase 0.
 
 ## New in V6
 
