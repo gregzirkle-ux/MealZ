@@ -38,6 +38,9 @@
     cook: null,
     authMessage: '',
     authError: '',
+    authStep: 'password',
+    authEmail: '',
+    authBusy: false,
     loading: true
   };
 
@@ -864,26 +867,86 @@
   }
 
   function renderAuth(setupError = false) {
+    const messages = `
+          ${state.authError ? `<div class="error-box">${escapeHtml(state.authError)}</div>` : ''}
+          ${state.authMessage ? `<div class="success-box">${escapeHtml(state.authMessage)}</div>` : ''}`;
+    if (state.authStep === 'code' && !setupError) {
+      root.innerHTML = `
+      <main class="auth-shell">
+        <section class="auth-card">
+          <div class="auth-logo">🍽</div>
+          <h1>Check your email</h1>
+          <p>We sent a sign in code to <strong>${escapeHtml(state.authEmail)}</strong>. Type it below. It can take a minute to arrive.</p>
+          ${messages}
+          <form id="code-form" class="auth-form">
+            <input id="auth-code" class="text-input code-input" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" placeholder="Code" required />
+            <div class="auth-actions">
+              <button class="btn btn-primary btn-wide" type="submit" ${state.authBusy ? 'disabled' : ''}>${state.authBusy ? 'Checking…' : 'Sign In'}</button>
+              <button class="btn btn-outline btn-wide" type="button" data-action="resend-code" ${state.authBusy ? 'disabled' : ''}>Send a New Code</button>
+            </div>
+          </form>
+          <p style="font-size:12px;margin-bottom:0"><button type="button" class="link-btn" data-action="use-password">Use a password instead</button></p>
+        </section>
+      </main>`;
+      document.getElementById('auth-code')?.focus();
+      return;
+    }
     root.innerHTML = `
       <main class="auth-shell">
         <section class="auth-card">
           <div class="auth-logo">🍽</div>
           <h1>Mealz</h1>
           <p>Each of you signs in with your own email. Your week, recipes, and grocery list are shared between you.</p>
-          ${setupError ? `<div class="error-box">${escapeHtml(state.authError)}</div>` : ''}
-          ${state.authError && !setupError ? `<div class="error-box">${escapeHtml(state.authError)}</div>` : ''}
-          ${state.authMessage ? `<div class="success-box">${escapeHtml(state.authMessage)}</div>` : ''}
+          ${messages}
           <form id="auth-form" class="auth-form">
-            <input class="text-input" name="email" type="email" autocomplete="email" placeholder="Email" required />
-            <input class="text-input" name="password" type="password" autocomplete="current-password" placeholder="Password" minlength="6" required />
+            <input class="text-input" name="email" type="email" autocomplete="email" placeholder="Email" value="${escapeHtml(state.authEmail)}" required />
+            <button class="btn btn-primary btn-wide" type="button" data-action="email-code" ${state.authBusy ? 'disabled' : ''}>${state.authBusy ? 'Sending…' : 'Email Me a Code'}</button>
+            <p class="auth-or">No password needed. Or use your password:</p>
+            <input class="text-input" name="password" type="password" autocomplete="current-password" placeholder="Password" minlength="6" />
             <div class="auth-actions">
-              <button class="btn btn-primary btn-wide" type="submit" data-auth-action="signin">Sign In</button>
+              <button class="btn btn-outline btn-wide" type="submit" data-auth-action="signin">Sign In With Password</button>
               <button class="btn btn-outline btn-wide" type="button" data-action="signup">Create Account</button>
             </div>
           </form>
-          <p style="font-size:12px;margin-bottom:0">New to Mealz? Tap Create Account using the email Greg invited. You'll join the household as soon as you sign in.</p>
+          <p style="font-size:12px;margin-bottom:0">New to Mealz? Tap Email Me a Code using the email Greg invited. You'll join the household as soon as you sign in.</p>
         </section>
       </main>`;
+  }
+
+  // Sign in with a code sent by email. A code is used instead of a link
+  // because the home screen app keeps its own login, separate from Safari.
+  async function emailSignInCode() {
+    const form = document.getElementById('auth-form');
+    const email = String((form ? new FormData(form).get('email') : state.authEmail) || '').trim();
+    if (!/^\S+@\S+\.\S+$/.test(email)) {
+      state.authError = 'Enter your email first.'; state.authMessage = ''; renderAuth(); return;
+    }
+    state.authEmail = email; state.authError = ''; state.authMessage = ''; state.authBusy = true; renderAuth();
+    const { error } = await sb.auth.signInWithOtp({ email, options: { shouldCreateUser: true } });
+    state.authBusy = false;
+    if (error) {
+      state.authError = /rate|seconds|security/i.test(error.message || '')
+        ? 'Too many codes asked for. Wait a minute, then try again, or use your password.'
+        : error.message;
+      renderAuth(); return;
+    }
+    state.authStep = 'code';
+    state.authMessage = '';
+    renderAuth();
+  }
+
+  async function verifySignInCode(form) {
+    const token = String(new FormData(form).get('code') || '').replace(/\D/g, '');
+    if (token.length < 6) { state.authError = 'Type the code from the email.'; renderAuth(); return; }
+    state.authBusy = true; state.authError = ''; renderAuth();
+    const { data, error } = await sb.auth.verifyOtp({ email: state.authEmail, token, type: 'email' });
+    state.authBusy = false;
+    if (error || !data?.session) {
+      state.authError = 'That code did not work. Check it, or tap Send a New Code.';
+      renderAuth(); return;
+    }
+    state.authStep = 'password';
+    await initializeShared(data.user);
   }
 
   function captureViewState() {
@@ -1747,8 +1810,10 @@
       if (action === 'close-cook') { state.cook = null; render(); return; }
       if (action === 'rate') { await rateRecipe(button.dataset.rating); return; }
       if (action === 'reset-demo') { if (confirm('Reset Demo Mode and restore the starter recipes?')) { await store.reset(); state.weekStart = startOfWeek(new Date()); await reloadData(); render(); toast('Demo reset'); } return; }
-      if (action === 'signout') { if (realtimeChannel) { await sb.removeChannel(realtimeChannel); realtimeChannel = null; } await sb.auth.signOut(); state.user = null; state.member = null; state.members = []; state.authMessage = ''; state.authError = ''; renderAuth(); return; }
+      if (action === 'signout') { if (realtimeChannel) { await sb.removeChannel(realtimeChannel); realtimeChannel = null; } await sb.auth.signOut(); state.user = null; state.member = null; state.members = []; state.authMessage = ''; state.authError = ''; state.authStep = 'password'; renderAuth(); return; }
       if (action === 'signup') { await authAction('signup'); return; }
+      if (action === 'email-code' || action === 'resend-code') { await emailSignInCode(); return; }
+      if (action === 'use-password') { state.authStep = 'password'; state.authError = ''; state.authMessage = ''; renderAuth(); return; }
     } catch (error) {
       console.error(error);
       toast(error.message || 'Something went wrong');
@@ -1828,6 +1893,7 @@
   async function handleSubmit(event) {
     event.preventDefault();
     if (event.target.id === 'auth-form') { await authAction('signin'); return; }
+    if (event.target.id === 'code-form') { await verifySignInCode(event.target); return; }
     if (event.target.id === 'grocery-form') {
       const fd = new FormData(event.target);
       await store.saveGrocery({
@@ -1846,6 +1912,7 @@
     const fd = new FormData(form);
     const email = String(fd.get('email') || '').trim();
     const password = String(fd.get('password') || '');
+    state.authEmail = email;
     if (!email || password.length < 6) {
       state.authError = 'Enter an email and a password of at least 6 characters.';
       state.authMessage = '';
