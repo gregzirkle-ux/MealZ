@@ -4,6 +4,32 @@ A shared dinner planner and recipe keeper built for phones first.
 
 **Main loop:** Plan the week, pick a recipe, add notes, shop, cook.
 
+## V7 Phase 2: Structured recipes, servings and leftovers
+
+Mealz now understands what is in each recipe, cooks at least 4 servings, plans leftovers, and adds up the grocery list for real.
+
+### What changed
+1. **Ingredients are organized automatically.** Each ingredient line is split into amount, unit, item, prep note and grocery section, using Claude through a new Vercel function (`api/convert-ingredients.js`). It happens in the background when a recipe is saved or imported, and all existing recipes are converted the first time someone opens the app after the update. More shows the progress. The original ingredient text is kept as a backup.
+2. **Flags instead of blocking.** If Mealz is not sure about a line, or had to estimate the servings, the recipe gets a small ⚑. Open it to see what is marked, then tap Looks Right, or Edit to fix it. Nothing stops you from planning.
+3. **Servings and course.** Recipes have a servings number (what the recipe makes as written) and a course: entree, side, app or dessert. Recipe Keeper recipes take servings from their "Serves" tag. Recipes with no servings get an estimate. You can change both in Edit.
+4. **Never less than 4.** A cook night always makes the recipe's servings or 4, whichever is more.
+5. **Leftovers.** Tap Leftovers on a cook night, or Add Leftovers after planning. Pick Lunch Only or 1, 2 or 3 leftover dinners, then the total servings to cook. Each dinner adds 4, and you can adjust it up or down, never below 4. The nights right after fill in as Leftovers Nights linked to the cook night. If one of those days already has a plan, Mealz asks first. Remove Leftovers clears them. Clearing or swapping a cook night asks, then clears its Leftovers Nights too.
+6. **Smarter grocery list.** Only cook nights count, each scaled to the servings planned. Leftovers Nights buy nothing. Amounts are added up across recipes with unit conversion, so 2 lb plus 8 oz shows as 2 lb 8 oz. The same recipe planned twice counts twice. A recipe that has not been organized yet still shows its original amounts, marked with the scale, like "1 lb (2x)".
+7. **Your unit setting.** More has Amounts (1 1/2 or 1.5) and Weights (Ounces, Lb and oz, or Pounds). Each person has their own setting, and it applies to the grocery list and recipes.
+8. **Sign in with an emailed link.** Type your email and tap Email Me a Sign In Link, then tap the link in the email. No password to remember. The link opens in Safari or your computer's browser; the Mealz icon on the home screen keeps its own login and stays signed in until you tap Sign Out there. Password sign in still works too.
+9. **Version and Check for Update.** More shows which version of Mealz is running and has a Check for Update button. If a newer version is out, it reloads into it.
+
+### Installing Phase 2
+1. In Vercel, Settings, Environment Variables, add `ANTHROPIC_API_KEY` for Production and Preview.
+2. In Supabase, SQL Editor, run `supabase-v7-phase2.sql` once. Do this before deploying the app files. It only adds tables and columns.
+3. Optional, for testing on a Vercel preview link: in Supabase, Authentication, URL Configuration, add `https://*-gregzirkle-7945s-projects.vercel.app/**` under Redirect URLs, so sign in links return to the preview instead of the live site.
+4. Deploy the changed files: `app.js`, `styles.css`, `index.html`, `vercel.json`, `version.json`, `package.json`, `package-lock.json`, `.gitignore`, `README.md`, plus the new `api/convert-ingredients.js`, `lib/units.js` and `supabase-v7-phase2.sql`.
+5. Open Mealz and leave it open for a few minutes. More, Ingredients shows the conversion progress. If you close it partway, it picks up where it left off next time.
+6. Look through recipes marked ⚑ when convenient.
+
+### Cost
+Conversion uses Claude Opus 5.5 at low effort, about 2 to 3 cents per recipe, so roughly $2 for the existing recipes and pennies after that. To use a cheaper model, set `ANTHROPIC_MODEL` in Vercel to `claude-haiku-5-5`.
+
 ## V7 Phase 1: Two logins, one household
 
 Greg and Stephanie now each sign in with their own email and share the same recipes, week, and grocery list.
