@@ -16,12 +16,12 @@ Mealz now understands what is in each recipe, cooks at least 4 servings, plans l
 5. **Leftovers.** Tap Leftovers on a cook night, or Add Leftovers after planning. Pick Lunch Only or 1, 2 or 3 leftover dinners, then the total servings to cook. Each dinner adds 4, and you can adjust it up or down, never below 4. The nights right after fill in as Leftovers Nights linked to the cook night. If one of those days already has a plan, Mealz asks first. Remove Leftovers clears them. Clearing or swapping a cook night asks, then clears its Leftovers Nights too.
 6. **Smarter grocery list.** Only cook nights count, each scaled to the servings planned. Leftovers Nights buy nothing. Amounts are added up across recipes with unit conversion, so 2 lb plus 8 oz shows as 2 lb 8 oz. The same recipe planned twice counts twice. A recipe that has not been organized yet still shows its original amounts, marked with the scale, like "1 lb (2x)".
 7. **Your unit setting.** More has Amounts (1 1/2 or 1.5) and Weights (Ounces, Lb and oz, or Pounds). Each person has their own setting, and it applies to the grocery list and recipes.
-8. **Sign in with an emailed code.** Type your email, tap Email Me a Code, and type the code from the email. No password to remember. It works inside the home screen app (a link would open Safari, which keeps a separate login). Password sign in still works too.
+8. **Sign in with an emailed link.** Type your email and tap Email Me a Sign In Link, then tap the link in the email. No password to remember. The link opens in Safari or your computer's browser; the Mealz icon on the home screen keeps its own login and stays signed in until you tap Sign Out there. Password sign in still works too.
 
 ### Installing Phase 2
 1. In Vercel, Settings, Environment Variables, add `ANTHROPIC_API_KEY` for Production and Preview.
 2. In Supabase, SQL Editor, run `supabase-v7-phase2.sql` once. Do this before deploying the app files. It only adds tables and columns.
-3. In Supabase, Authentication, Emails, edit the **Magic Link** and **Confirm signup** templates and add a line with `{{ .Token }}` so the email shows the sign in code.
+3. Optional, for testing on a Vercel preview link: in Supabase, Authentication, URL Configuration, add `https://*-gregzirkle-7945s-projects.vercel.app/**` under Redirect URLs, so sign in links return to the preview instead of the live site.
 4. Deploy the changed files: `app.js`, `styles.css`, `index.html`, `vercel.json`, `package.json`, `package-lock.json`, `.gitignore`, `README.md`, plus the new `api/convert-ingredients.js`, `lib/units.js` and `supabase-v7-phase2.sql`.
 5. Open Mealz and leave it open for a few minutes. More, Ingredients shows the conversion progress. If you close it partway, it picks up where it left off next time.
 6. Look through recipes marked ⚑ when convenient.
